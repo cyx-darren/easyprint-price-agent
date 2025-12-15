@@ -134,8 +134,11 @@ router.post('/query', async (req, res) => {
     console.log('[PRICE-QUERY] Pricing results:');
     results.forEach((r, i) => {
       console.log(`[PRICE-QUERY]   ${i + 1}. Product: "${r.product_name}"`);
-      console.log(`[PRICE-QUERY]      Print: ${r.print_option || 'N/A'} | Lead time: ${r.lead_time_type || leadTimeType}`);
-      console.log(`[PRICE-QUERY]      Quantity: ${r.quantity || parsedQuery.quantity || 'N/A'} | Unit price: $${r.unit_price} | Total: $${r.total_price || (r.unit_price * (r.quantity || parsedQuery.quantity || 1)).toFixed(2)}`);
+      console.log(`[PRICE-QUERY]      Print: ${r.print_option || 'N/A'} | Lead time: ${r.lead_time?.type || leadTimeType}`);
+      console.log(`[PRICE-QUERY]      Quantity: ${r.pricing?.requested_quantity || parsedQuery.quantity || 'N/A'} | Unit price: $${r.pricing?.unit_price} | Total: $${r.pricing?.total_price}`);
+      if (r.moq) {
+        console.log(`[PRICE-QUERY]      MOQ: ${r.moq.quantity} @ $${r.moq.unit_price}/unit`);
+      }
     });
 
     // Step 5: Get alternatives if we have results
@@ -150,7 +153,7 @@ router.post('/query', async (req, res) => {
       if (alternatives.length > 0) {
         console.log(`[PRICE-QUERY] Alternatives (${alternatives.length}):`);
         alternatives.forEach((a, i) => {
-          console.log(`[PRICE-QUERY]   ${i + 1}. ${a.product_name} - $${a.unit_price}/unit`);
+          console.log(`[PRICE-QUERY]   ${i + 1}. ${a.product_name} - $${a.unit_price_at_qty}/unit`);
         });
       }
     }
