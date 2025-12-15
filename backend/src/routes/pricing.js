@@ -53,7 +53,13 @@ router.post('/query', async (req, res) => {
   try {
     const { query, context } = req.body;
 
+    // Log incoming request
+    console.log('[PRICE-QUERY] ========== NEW REQUEST ==========');
+    console.log(`[PRICE-QUERY] Query: "${query}"`);
+    console.log(`[PRICE-QUERY] Context: ${JSON.stringify(context || {})}`);
+
     if (!query) {
+      console.log('[PRICE-QUERY] ERROR: Missing query parameter');
       return res.status(400).json(
         formatErrorResponse('MISSING_PARAMETERS', 'Query is required')
       );
@@ -63,7 +69,13 @@ router.post('/query', async (req, res) => {
     let parsedQuery;
     try {
       parsedQuery = await parseQuery(query);
+      console.log('[PRICE-QUERY] Parsed query:');
+      console.log(`[PRICE-QUERY]   - Product: "${parsedQuery.product || 'N/A'}"`);
+      console.log(`[PRICE-QUERY]   - Quantity: ${parsedQuery.quantity || 'N/A'}`);
+      console.log(`[PRICE-QUERY]   - Print option: "${parsedQuery.print_option || 'N/A'}"`);
+      console.log(`[PRICE-QUERY]   - Lead time: "${parsedQuery.lead_time || 'local'}"`);
     } catch (error) {
+      console.log(`[PRICE-QUERY] ERROR: Could not parse query - ${error.message}`);
       return res.status(400).json(
         formatErrorResponse('INVALID_QUERY', 'Could not parse product from query')
       );
@@ -75,6 +87,10 @@ router.post('/query', async (req, res) => {
     if (!products || products.length === 0) {
       // No matches - return suggestions
       const suggestions = await getProductSuggestions(parsedQuery.product || '', 5);
+
+      console.log(`[PRICE-QUERY] No matches found for "${parsedQuery.product}"`);
+      console.log(`[PRICE-QUERY] Suggestions offered: ${JSON.stringify(suggestions.map(s => s.name || s))}`);
+      console.log(`[PRICE-QUERY] ========== RESPONSE SENT (${Date.now() - startTime}ms) ==========`);
 
       return res.json(formatQueryResponse(
         {
@@ -90,6 +106,12 @@ router.post('/query', async (req, res) => {
         }
       ));
     }
+
+    // Log products found
+    console.log(`[PRICE-QUERY] Product search results (${products.length} found):`);
+    products.forEach((p, i) => {
+      console.log(`[PRICE-QUERY]   ${i + 1}. ${p.name} (ID: ${p.id})`);
+    });
 
     // Step 3: Map lead_time to lead_time_type
     let leadTimeType = 'local';
@@ -108,6 +130,14 @@ router.post('/query', async (req, res) => {
       leadTimeType
     });
 
+    // Log pricing results
+    console.log('[PRICE-QUERY] Pricing results:');
+    results.forEach((r, i) => {
+      console.log(`[PRICE-QUERY]   ${i + 1}. Product: "${r.product_name}"`);
+      console.log(`[PRICE-QUERY]      Print: ${r.print_option || 'N/A'} | Lead time: ${r.lead_time_type || leadTimeType}`);
+      console.log(`[PRICE-QUERY]      Quantity: ${r.quantity || parsedQuery.quantity || 'N/A'} | Unit price: $${r.unit_price} | Total: $${r.total_price || (r.unit_price * (r.quantity || parsedQuery.quantity || 1)).toFixed(2)}`);
+    });
+
     // Step 5: Get alternatives if we have results
     let alternatives = [];
     if (results.length > 0) {
@@ -116,7 +146,17 @@ router.post('/query', async (req, res) => {
         parsedQuery.quantity || 100,
         3
       );
+
+      if (alternatives.length > 0) {
+        console.log(`[PRICE-QUERY] Alternatives (${alternatives.length}):`);
+        alternatives.forEach((a, i) => {
+          console.log(`[PRICE-QUERY]   ${i + 1}. ${a.product_name} - $${a.unit_price}/unit`);
+        });
+      }
     }
+
+    console.log(`[PRICE-QUERY] ========== RESPONSE SENT (${Date.now() - startTime}ms) ==========`);
+    console.log(`[PRICE-QUERY] Success: true | Products: ${results.length} | Alternatives: ${alternatives.length}`);
 
     return res.json(formatQueryResponse(
       {
@@ -130,7 +170,8 @@ router.post('/query', async (req, res) => {
     ));
 
   } catch (error) {
-    console.error('Query error:', error);
+    console.error('[PRICE-QUERY] ERROR:', error.message);
+    console.error('[PRICE-QUERY] Stack:', error.stack);
     return res.status(500).json(
       formatErrorResponse('DATABASE_ERROR', error.message)
     );
@@ -139,10 +180,17 @@ router.post('/query', async (req, res) => {
 
 // POST /api/price/lookup - Direct structured lookup
 router.post('/lookup', async (req, res) => {
+  const startTime = Date.now();
+
   try {
     const { product_name, print_option, lead_time_type, quantity } = req.body;
 
+    console.log('[PRICE-LOOKUP] ========== NEW REQUEST ==========');
+    console.log(`[PRICE-LOOKUP] Product: "${product_name}"`);
+    console.log(`[PRICE-LOOKUP] Print: ${print_option || 'N/A'} | Lead time: ${lead_time_type || 'local'} | Qty: ${quantity || 'N/A'}`);
+
     if (!product_name) {
+      console.log('[PRICE-LOOKUP] ERROR: Missing product_name');
       return res.status(400).json(
         formatErrorResponse('MISSING_PARAMETERS', 'product_name is required')
       );
@@ -157,6 +205,8 @@ router.post('/lookup', async (req, res) => {
     });
 
     if (!pricing) {
+      console.log(`[PRICE-LOOKUP] No pricing found for "${product_name}"`);
+      console.log(`[PRICE-LOOKUP] ========== RESPONSE SENT (${Date.now() - startTime}ms) ==========`);
       return res.status(404).json(
         formatErrorResponse('PRODUCT_NOT_FOUND', 'No pricing found for this product variant')
       );
@@ -164,6 +214,12 @@ router.post('/lookup', async (req, res) => {
 
     // Get MOQ info
     const moqInfo = await getMOQInfo(product_name);
+
+    console.log('[PRICE-LOOKUP] Result:');
+    console.log(`[PRICE-LOOKUP]   Product: "${pricing.product_name}"`);
+    console.log(`[PRICE-LOOKUP]   Quantity: ${pricing.requested_quantity || pricing.quantity} | Unit: $${pricing.unit_price} | Total: $${pricing.total_price}`);
+    console.log(`[PRICE-LOOKUP]   MOQ: ${moqInfo ? moqInfo.lowest_moq : 'N/A'}`);
+    console.log(`[PRICE-LOOKUP] ========== RESPONSE SENT (${Date.now() - startTime}ms) ==========`);
 
     return res.json({
       success: true,
@@ -180,7 +236,8 @@ router.post('/lookup', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Lookup error:', error);
+    console.error('[PRICE-LOOKUP] ERROR:', error.message);
+    console.error('[PRICE-LOOKUP] Stack:', error.stack);
     return res.status(500).json(
       formatErrorResponse('DATABASE_ERROR', error.message)
     );
@@ -189,8 +246,13 @@ router.post('/lookup', async (req, res) => {
 
 // GET /api/price/products - List all products
 router.get('/products', async (req, res) => {
+  const startTime = Date.now();
+
   try {
     const { category, limit = 20, offset = 0 } = req.query;
+
+    console.log('[PRICE-PRODUCTS] ========== NEW REQUEST ==========');
+    console.log(`[PRICE-PRODUCTS] Category: ${category || 'all'} | Limit: ${limit} | Offset: ${offset}`);
 
     const result = await getAllProducts({
       category,
@@ -198,13 +260,16 @@ router.get('/products', async (req, res) => {
       offset: parseInt(offset, 10)
     });
 
+    console.log(`[PRICE-PRODUCTS] Returned ${result.products ? result.products.length : 0} products`);
+    console.log(`[PRICE-PRODUCTS] ========== RESPONSE SENT (${Date.now() - startTime}ms) ==========`);
+
     return res.json({
       success: true,
       data: result
     });
 
   } catch (error) {
-    console.error('Products list error:', error);
+    console.error('[PRICE-PRODUCTS] ERROR:', error.message);
     return res.status(500).json(
       formatErrorResponse('DATABASE_ERROR', error.message)
     );
@@ -213,11 +278,18 @@ router.get('/products', async (req, res) => {
 
 // GET /api/price/product/:name/tiers - Get pricing tiers for a product
 router.get('/product/:name/tiers', async (req, res) => {
+  const startTime = Date.now();
+
   try {
     const { name } = req.params;
     const { print_option, lead_time } = req.query;
 
+    console.log('[PRICE-TIERS] ========== NEW REQUEST ==========');
+    console.log(`[PRICE-TIERS] Product: "${name}"`);
+    console.log(`[PRICE-TIERS] Print: ${print_option || 'N/A'} | Lead time: ${lead_time || 'local'}`);
+
     if (!name) {
+      console.log('[PRICE-TIERS] ERROR: Missing product name');
       return res.status(400).json(
         formatErrorResponse('MISSING_PARAMETERS', 'Product name is required')
       );
@@ -228,6 +300,8 @@ router.get('/product/:name/tiers', async (req, res) => {
     // Verify product exists
     const product = await getProductByName(decodedName);
     if (!product) {
+      console.log(`[PRICE-TIERS] Product not found: "${decodedName}"`);
+      console.log(`[PRICE-TIERS] ========== RESPONSE SENT (${Date.now() - startTime}ms) ==========`);
       return res.status(404).json(
         formatErrorResponse('PRODUCT_NOT_FOUND', 'Product not found')
       );
@@ -241,10 +315,15 @@ router.get('/product/:name/tiers', async (req, res) => {
     });
 
     if (!tiers) {
+      console.log(`[PRICE-TIERS] No tiers found for "${decodedName}"`);
+      console.log(`[PRICE-TIERS] ========== RESPONSE SENT (${Date.now() - startTime}ms) ==========`);
       return res.status(404).json(
         formatErrorResponse('PRODUCT_NOT_FOUND', 'No pricing tiers found for this variant')
       );
     }
+
+    console.log(`[PRICE-TIERS] Found ${tiers.tiers ? tiers.tiers.length : 0} pricing tiers`);
+    console.log(`[PRICE-TIERS] ========== RESPONSE SENT (${Date.now() - startTime}ms) ==========`);
 
     return res.json({
       success: true,
@@ -252,7 +331,7 @@ router.get('/product/:name/tiers', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Tiers error:', error);
+    console.error('[PRICE-TIERS] ERROR:', error.message);
     return res.status(500).json(
       formatErrorResponse('DATABASE_ERROR', error.message)
     );
@@ -261,10 +340,16 @@ router.get('/product/:name/tiers', async (req, res) => {
 
 // GET /api/price/moq/:productName - Get MOQ info for a product
 router.get('/moq/:productName', async (req, res) => {
+  const startTime = Date.now();
+
   try {
     const { productName } = req.params;
 
+    console.log('[PRICE-MOQ] ========== NEW REQUEST ==========');
+    console.log(`[PRICE-MOQ] Product: "${productName}"`);
+
     if (!productName) {
+      console.log('[PRICE-MOQ] ERROR: Missing product name');
       return res.status(400).json(
         formatErrorResponse('MISSING_PARAMETERS', 'Product name is required')
       );
@@ -276,10 +361,15 @@ router.get('/moq/:productName', async (req, res) => {
     const moqInfo = await getMOQInfo(decodedName);
 
     if (!moqInfo) {
+      console.log(`[PRICE-MOQ] No MOQ info found for "${decodedName}"`);
+      console.log(`[PRICE-MOQ] ========== RESPONSE SENT (${Date.now() - startTime}ms) ==========`);
       return res.status(404).json(
         formatErrorResponse('PRODUCT_NOT_FOUND', 'No MOQ information found for this product')
       );
     }
+
+    console.log(`[PRICE-MOQ] MOQ for "${decodedName}": ${moqInfo.lowest_moq}`);
+    console.log(`[PRICE-MOQ] ========== RESPONSE SENT (${Date.now() - startTime}ms) ==========`);
 
     return res.json({
       success: true,
@@ -287,7 +377,7 @@ router.get('/moq/:productName', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('MOQ error:', error);
+    console.error('[PRICE-MOQ] ERROR:', error.message);
     return res.status(500).json(
       formatErrorResponse('DATABASE_ERROR', error.message)
     );
