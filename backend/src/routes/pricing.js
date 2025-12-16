@@ -122,13 +122,37 @@ router.post('/query', async (req, res) => {
       }
     }
 
-    // Step 4: Get pricing for found products
-    const results = await getPricingForProducts({
+    // Step 4: Get pricing for found products (with fallback to overseas pricing)
+    let results = await getPricingForProducts({
       products,
       quantity: parsedQuery.quantity,
       printOption: parsedQuery.print_option,
       leadTimeType
     });
+
+    // Fallback: If no local pricing found, try overseas_air
+    if (results.length === 0 && leadTimeType === 'local') {
+      console.log('[PRICE-QUERY] No local pricing found, trying overseas_air...');
+      leadTimeType = 'overseas_air';
+      results = await getPricingForProducts({
+        products,
+        quantity: parsedQuery.quantity,
+        printOption: parsedQuery.print_option,
+        leadTimeType
+      });
+
+      // Fallback: If still no results, try overseas_sea
+      if (results.length === 0) {
+        console.log('[PRICE-QUERY] No overseas_air pricing found, trying overseas_sea...');
+        leadTimeType = 'overseas_sea';
+        results = await getPricingForProducts({
+          products,
+          quantity: parsedQuery.quantity,
+          printOption: parsedQuery.print_option,
+          leadTimeType
+        });
+      }
+    }
 
     // Log pricing results
     console.log('[PRICE-QUERY] Pricing results:');
