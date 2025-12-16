@@ -1,14 +1,140 @@
 const { supabase } = require('./supabase');
 
 /**
- * Search for products matching a query string
- * Uses exact match, ILIKE, full-text search in priority order
+ * Validate fuzzy match to prevent returning wrong products
+ * Requires at least 50% word overlap between search term and product name
  *
- * @param {string} query - Search query
+ * @param {string} searchTerm - Original search term
+ * @param {string} foundProductName - Product name found in database
+ * @returns {boolean} Whether the match is valid
+ */
+function validateMatch(searchTerm, foundProductName) {
+  const searchWords = searchTerm.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+  const productWords = foundProductName.toLowerCase().split(/\s+/);
+
+  // If no significant search words, accept the match
+  if (searchWords.length === 0) {
+    return true;
+  }
+
+  // Calculate word overlap
+  const matchingWords = searchWords.filter(sw =>
+    productWords.some(pw => pw.includes(sw) || sw.includes(pw))
+  );
+
+  // Require at least 50% of search words to match
+  const overlapRatio = matchingWords.length / searchWords.length;
+
+  if (overlapRatio < 0.5) {
+    console.warn(`[SEARCH] Rejecting low-confidence match: "${searchTerm}" → "${foundProductName}" (${(overlapRatio * 100).toFixed(0)}% overlap)`);
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Tier 1: Exact match (case-sensitive)
+ */
+async function searchExact(query, category, limit) {
+  let queryBuilder = supabase
+    .from('products')
+    .select('id, name, category, dimensions, material, color')
+    .eq('name', query)
+    .limit(limit);
+
+  if (category) {
+    queryBuilder = queryBuilder.eq('category', category);
+  }
+
+  const { data, error } = await queryBuilder;
+
+  if (error) {
+    throw new Error(`Database error: ${error.message}`);
+  }
+
+  return data || [];
+}
+
+/**
+ * Tier 2: Case-insensitive exact match (no wildcards)
+ */
+async function searchExactInsensitive(query, category, limit) {
+  let queryBuilder = supabase
+    .from('products')
+    .select('id, name, category, dimensions, material, color')
+    .ilike('name', query)
+    .limit(limit);
+
+  if (category) {
+    queryBuilder = queryBuilder.eq('category', category);
+  }
+
+  const { data, error } = await queryBuilder;
+
+  if (error) {
+    throw new Error(`Database error: ${error.message}`);
+  }
+
+  return data || [];
+}
+
+/**
+ * Tier 3: Fuzzy match (contains search requiring ALL words)
+ */
+async function searchFuzzy(query, category, limit) {
+  const words = query.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+
+  if (words.length === 0) {
+    // Fall back to contains match if no significant words
+    let queryBuilder = supabase
+      .from('products')
+      .select('id, name, category, dimensions, material, color')
+      .ilike('name', `%${query.trim()}%`)
+      .limit(limit);
+
+    if (category) {
+      queryBuilder = queryBuilder.eq('category', category);
+    }
+
+    const { data, error } = await queryBuilder;
+    if (error) throw new Error(`Database error: ${error.message}`);
+    return data || [];
+  }
+
+  // Build a query that matches ALL words (not ANY)
+  let queryBuilder = supabase
+    .from('products')
+    .select('id, name, category, dimensions, material, color')
+    .limit(limit);
+
+  for (const word of words) {
+    queryBuilder = queryBuilder.ilike('name', `%${word}%`);
+  }
+
+  if (category) {
+    queryBuilder = queryBuilder.eq('category', category);
+  }
+
+  const { data, error } = await queryBuilder;
+
+  if (error) {
+    throw new Error(`Database error: ${error.message}`);
+  }
+
+  return data || [];
+}
+
+/**
+ * Search for products matching a query string
+ * Uses tiered search strategy: Exact → Case-insensitive → Fuzzy with validation
+ * Returns matchType with each result to indicate confidence level
+ *
+ * @param {string} query - Search query (ideally canonical product name from Orchestrator)
  * @param {object} options - Search options
  * @param {number} options.limit - Max results (default 10)
  * @param {string} options.category - Filter by category
- * @returns {Promise<Array>} Matching products
+ * @returns {Promise<Array>} Matching products with matchType field
  */
 async function searchProducts(query, options = {}) {
   const { limit = 10, category = null } = options;
@@ -23,103 +149,33 @@ async function searchProducts(query, options = {}) {
 
   const searchTerm = query.trim();
 
-  // Step 1: Try exact match first
-  let queryBuilder = supabase
-    .from('products')
-    .select('id, name, category, dimensions, material, color')
-    .ilike('name', searchTerm)
-    .limit(limit);
+  console.log(`[SEARCH] Searching for: "${searchTerm}"`);
 
-  if (category) {
-    queryBuilder = queryBuilder.eq('category', category);
+  // Tier 1: Exact match (case-sensitive)
+  let result = await searchExact(searchTerm, category, limit);
+  if (result.length > 0) {
+    console.log(`[SEARCH] Found ${result.length} exact match(es)`);
+    return result.map(r => ({ ...r, matchType: 'exact' }));
   }
 
-  let { data: exactMatches, error: exactError } = await queryBuilder;
-
-  if (exactError) {
-    throw new Error(`Database error: ${exactError.message}`);
+  // Tier 2: Case-insensitive exact match (no wildcards)
+  result = await searchExactInsensitive(searchTerm, category, limit);
+  if (result.length > 0) {
+    console.log(`[SEARCH] Found ${result.length} case-insensitive exact match(es)`);
+    return result.map(r => ({ ...r, matchType: 'exact_insensitive' }));
   }
 
-  if (exactMatches && exactMatches.length > 0) {
-    return exactMatches;
-  }
+  // Tier 3: Fuzzy match with validation
+  result = await searchFuzzy(searchTerm, category, limit);
+  const validated = result.filter(r => validateMatch(searchTerm, r.name));
 
-  // Step 2: Try contains match using ILIKE
-  queryBuilder = supabase
-    .from('products')
-    .select('id, name, category, dimensions, material, color')
-    .ilike('name', `%${searchTerm}%`)
-    .limit(limit);
-
-  if (category) {
-    queryBuilder = queryBuilder.eq('category', category);
-  }
-
-  let { data: containsMatches, error: containsError } = await queryBuilder;
-
-  if (containsError) {
-    throw new Error(`Database error: ${containsError.message}`);
-  }
-
-  if (containsMatches && containsMatches.length > 0) {
-    return containsMatches;
-  }
-
-  // Step 3: Try word-based matching (split query into words)
-  const words = searchTerm.toLowerCase().split(/\s+/).filter(w => w.length > 2);
-
-  if (words.length > 0) {
-    // Build a query that matches all words
-    queryBuilder = supabase
-      .from('products')
-      .select('id, name, category, dimensions, material, color')
-      .limit(limit);
-
-    // Add ILIKE conditions for each word
-    for (const word of words) {
-      queryBuilder = queryBuilder.ilike('name', `%${word}%`);
-    }
-
-    if (category) {
-      queryBuilder = queryBuilder.eq('category', category);
-    }
-
-    let { data: wordMatches, error: wordError } = await queryBuilder;
-
-    if (wordError) {
-      throw new Error(`Database error: ${wordError.message}`);
-    }
-
-    if (wordMatches && wordMatches.length > 0) {
-      return wordMatches;
-    }
-
-    // Step 4: Relaxed search - match ANY word
-    queryBuilder = supabase
-      .from('products')
-      .select('id, name, category, dimensions, material, color')
-      .limit(limit);
-
-    // Build OR conditions for words
-    const orConditions = words.map(word => `name.ilike.%${word}%`).join(',');
-    queryBuilder = queryBuilder.or(orConditions);
-
-    if (category) {
-      queryBuilder = queryBuilder.eq('category', category);
-    }
-
-    let { data: anyWordMatches, error: anyWordError } = await queryBuilder;
-
-    if (anyWordError) {
-      throw new Error(`Database error: ${anyWordError.message}`);
-    }
-
-    if (anyWordMatches && anyWordMatches.length > 0) {
-      return anyWordMatches;
-    }
+  if (validated.length > 0) {
+    console.log(`[SEARCH] Found ${validated.length} validated fuzzy match(es) (rejected ${result.length - validated.length})`);
+    return validated.map(r => ({ ...r, matchType: 'fuzzy' }));
   }
 
   // No matches found
+  console.log(`[SEARCH] No matches found for "${searchTerm}"`);
   return [];
 }
 
@@ -285,5 +341,6 @@ module.exports = {
   getProductByName,
   getProductPrintOptions,
   getAllProducts,
-  getProductSuggestions
+  getProductSuggestions,
+  validateMatch
 };

@@ -107,8 +107,9 @@ router.post('/query', async (req, res) => {
       ));
     }
 
-    // Log products found
-    console.log(`[PRICE-QUERY] Product search results (${products.length} found):`);
+    // Log products found with matchType
+    const matchType = products[0]?.matchType || 'unknown';
+    console.log(`[PRICE-QUERY] Product search results (${products.length} found, matchType: ${matchType}):`);
     products.forEach((p, i) => {
       console.log(`[PRICE-QUERY]   ${i + 1}. ${p.name} (ID: ${p.id})`);
     });
@@ -183,7 +184,12 @@ router.post('/query', async (req, res) => {
     }
 
     console.log(`[PRICE-QUERY] ========== RESPONSE SENT (${Date.now() - startTime}ms) ==========`);
-    console.log(`[PRICE-QUERY] Success: true | Products: ${results.length} | Alternatives: ${alternatives.length}`);
+    console.log(`[PRICE-QUERY] Success: true | Products: ${results.length} | Alternatives: ${alternatives.length} | MatchType: ${matchType}`);
+
+    // Add warning for fuzzy matches
+    const warning = matchType === 'fuzzy'
+      ? 'Product matched via fuzzy search - please verify correctness'
+      : null;
 
     return res.json(formatQueryResponse(
       {
@@ -192,7 +198,9 @@ router.post('/query', async (req, res) => {
       },
       {
         queryParsed: parsedQuery,
-        processingTime: Date.now() - startTime
+        matchType,
+        processingTime: Date.now() - startTime,
+        warning
       }
     ));
 
@@ -202,6 +210,135 @@ router.post('/query', async (req, res) => {
     return res.status(500).json(
       formatErrorResponse('DATABASE_ERROR', error.message)
     );
+  }
+});
+
+// POST /api/price/batch - Batch pricing query (for Orchestrator)
+// Accepts canonical product names and returns pricing for multiple products
+router.post('/batch', async (req, res) => {
+  const startTime = Date.now();
+
+  try {
+    const { products, quantities } = req.body;
+
+    console.log('[PRICE-BATCH] ========== NEW REQUEST ==========');
+    console.log(`[PRICE-BATCH] Products: ${JSON.stringify(products)}`);
+    console.log(`[PRICE-BATCH] Quantities: ${JSON.stringify(quantities)}`);
+
+    if (!products || !Array.isArray(products) || products.length === 0) {
+      console.log('[PRICE-BATCH] ERROR: Missing or invalid products array');
+      return res.status(400).json({
+        success: false,
+        error: { code: 'MISSING_PARAMETERS', message: 'products array is required' }
+      });
+    }
+
+    const results = await Promise.all(
+      products.map(async (productName) => {
+        const quantity = quantities?.[productName] || 100;
+
+        console.log(`[PRICE-BATCH] Processing: "${productName}" (qty: ${quantity})`);
+
+        // Search for the product using tiered strategy
+        const searchResults = await searchProducts(productName, { limit: 1 });
+
+        if (searchResults.length === 0) {
+          console.log(`[PRICE-BATCH] NOT FOUND: "${productName}"`);
+          return {
+            searchedTerm: productName,
+            found: false,
+            matchType: 'not_found',
+            message: `No pricing found for "${productName}"`
+          };
+        }
+
+        const product = searchResults[0];
+        const matchType = product.matchType;
+
+        console.log(`[PRICE-BATCH] Match: "${productName}" → "${product.name}" (${matchType})`);
+
+        // Get pricing with lead time fallback (local → overseas_air → overseas_sea)
+        let leadTimeType = 'local';
+        let pricing = await getPricingForProducts({
+          products: [product],
+          quantity,
+          leadTimeType
+        });
+
+        if (pricing.length === 0) {
+          leadTimeType = 'overseas_air';
+          pricing = await getPricingForProducts({
+            products: [product],
+            quantity,
+            leadTimeType
+          });
+        }
+
+        if (pricing.length === 0) {
+          leadTimeType = 'overseas_sea';
+          pricing = await getPricingForProducts({
+            products: [product],
+            quantity,
+            leadTimeType
+          });
+        }
+
+        if (pricing.length === 0) {
+          console.log(`[PRICE-BATCH] NO PRICING: "${productName}" (product exists but no pricing)`);
+          return {
+            searchedTerm: productName,
+            found: false,
+            matchType: 'not_found',
+            message: `No pricing found for "${productName}"`
+          };
+        }
+
+        const result = {
+          searchedTerm: productName,
+          found: true,
+          matchType,
+          product: {
+            name: pricing[0].product_name,
+            pricing: {
+              quantity,
+              unitPrice: pricing[0].pricing.unit_price,
+              totalPrice: pricing[0].pricing.total_price,
+              currency: pricing[0].pricing.currency
+            },
+            moq: pricing[0].moq,
+            leadTime: pricing[0].lead_time
+          }
+        };
+
+        // Add warning for fuzzy matches
+        if (matchType === 'fuzzy') {
+          result.warning = 'Matched via fuzzy search - please verify product';
+        }
+
+        console.log(`[PRICE-BATCH] SUCCESS: "${productName}" @ $${pricing[0].pricing.unit_price}/unit (${leadTimeType})`);
+
+        return result;
+      })
+    );
+
+    // Log summary
+    const found = results.filter(r => r.found).length;
+    const notFound = results.filter(r => !r.found).length;
+    console.log(`[PRICE-BATCH] ========== RESPONSE SENT (${Date.now() - startTime}ms) ==========`);
+    console.log(`[PRICE-BATCH] Found: ${found} | Not Found: ${notFound}`);
+
+    return res.json({
+      success: found > 0,
+      results
+    });
+
+  } catch (error) {
+    console.error('[PRICE-BATCH] ERROR:', error.message);
+    console.error('[PRICE-BATCH] Stack:', error.stack);
+    return res.status(500).json({
+      success: false,
+      error: { code: 'DATABASE_ERROR', message: error.message }
+    });
   }
 });
 

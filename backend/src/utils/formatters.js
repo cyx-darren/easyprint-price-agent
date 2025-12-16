@@ -2,7 +2,7 @@
  * Format a successful pricing query response
  *
  * @param {object} data - Pricing data
- * @param {object} meta - Metadata (parsed query, processing time)
+ * @param {object} meta - Metadata (parsed query, processing time, matchType)
  * @returns {object} Formatted response
  */
 function formatQueryResponse(data, meta) {
@@ -16,8 +16,10 @@ function formatQueryResponse(data, meta) {
     },
     meta: {
       query_parsed: meta.queryParsed || null,
+      match_type: meta.matchType || null,
       processing_time_ms: meta.processingTime || 0,
-      message: meta.message || null
+      message: meta.message || null,
+      warning: meta.warning || null
     }
   };
 }
