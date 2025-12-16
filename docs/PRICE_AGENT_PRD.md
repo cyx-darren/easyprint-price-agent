@@ -220,9 +220,107 @@ Authorization: Bearer <PRICE_AGENT_API_KEY>
 
 ---
 
+### Endpoint: POST /api/price/batch
+
+**Primary endpoint for Orchestrator** - accepts canonical product names (pre-resolved by Product Agent).
+
+#### Request
+```json
+{
+  "products": ["Hooded Sweatshirt", "100% Cotton T-Shirt"],
+  "quantities": {
+    "Hooded Sweatshirt": 500,
+    "100% Cotton T-Shirt": 1500
+  }
+}
+```
+
+#### Response (Success)
+```json
+{
+  "success": true,
+  "results": [
+    {
+      "searchedTerm": "Hooded Sweatshirt",
+      "found": true,
+      "matchType": "exact",
+      "product": {
+        "name": "Hooded Sweatshirt",
+        "pricing": {
+          "quantity": 500,
+          "unitPrice": 12.50,
+          "totalPrice": 6250.00,
+          "currency": "SGD"
+        },
+        "moq": {
+          "quantity": 30,
+          "print_option": "silkscreen print - 1c",
+          "unit_price": 18.50
+        },
+        "leadTime": {
+          "type": "local",
+          "days_min": 5,
+          "days_max": 10
+        }
+      }
+    },
+    {
+      "searchedTerm": "100% Cotton T-Shirt",
+      "found": true,
+      "matchType": "exact",
+      "product": { ... }
+    }
+  ]
+}
+```
+
+#### Response (Fuzzy Match - includes warning)
+```json
+{
+  "success": true,
+  "results": [
+    {
+      "searchedTerm": "Canvas Tote Bag",
+      "found": true,
+      "matchType": "fuzzy",
+      "warning": "Matched via fuzzy search - please verify product",
+      "product": {
+        "name": "A4 Canvas Cream Tote Bag",
+        ...
+      }
+    }
+  ]
+}
+```
+
+#### Response (Not Found)
+```json
+{
+  "success": false,
+  "results": [
+    {
+      "searchedTerm": "Unknown Product XYZ",
+      "found": false,
+      "matchType": "not_found",
+      "message": "No pricing found for \"Unknown Product XYZ\""
+    }
+  ]
+}
+```
+
+#### Match Types
+| matchType | Description |
+|-----------|-------------|
+| `exact` | Case-sensitive exact match on product name |
+| `exact_insensitive` | Case-insensitive exact match (no wildcards) |
+| `fuzzy` | Partial match with validation (50%+ word overlap required) |
+| `not_found` | No matching product found |
+
+---
+
 ### Endpoint: POST /api/price/query
 
-Primary endpoint for natural language pricing queries from the orchestrator.
+Natural language pricing queries (used by Discord bot's `!price` command).
 
 #### Request
 ```json
@@ -284,7 +382,9 @@ Primary endpoint for natural language pricing queries from the orchestrator.
       "quantity": 500,
       "print_option": "silkscreen"
     },
-    "processing_time_ms": 145
+    "match_type": "exact",
+    "processing_time_ms": 145,
+    "warning": null
   }
 }
 ```
@@ -308,7 +408,9 @@ Primary endpoint for natural language pricing queries from the orchestrator.
       "quantity": null,
       "print_option": null
     },
-    "message": "No exact matches found. Did you mean one of these products?"
+    "match_type": null,
+    "message": "No exact matches found. Did you mean one of these products?",
+    "warning": null
   }
 }
 ```
@@ -539,28 +641,48 @@ Respond in JSON format only:
 
 ## Product Search Logic
 
-### Search Priority
-1. **Exact match** on product_name
-2. **Contains match** using ILIKE
-3. **Full-text search** using PostgreSQL tsvector
-4. **Fuzzy match** using similarity threshold
+### Tiered Search Strategy
 
-### SQL Example
-```sql
--- Primary search query
-SELECT DISTINCT ON (product_name) 
-  product_name,
-  dimensions,
-  category
-FROM products
-WHERE 
-  product_name ILIKE '%' || $1 || '%'
-  OR to_tsvector('english', product_name) @@ plainto_tsquery('english', $1)
-ORDER BY 
-  product_name,
-  similarity(product_name, $1) DESC
-LIMIT 10;
+The Price Agent uses a strict 3-tier search strategy to prevent returning wrong products:
+
+| Tier | Method | Description |
+|------|--------|-------------|
+| 1 | **Exact Match** | Case-sensitive `.eq('name', query)` |
+| 2 | **Case-Insensitive Exact** | `.ilike('name', query)` - no wildcards |
+| 3 | **Fuzzy Match + Validation** | Contains search with 50% word overlap validation |
+
+### Why This Matters
+
+**Previous Bug:** Searching "t-shirt and hoodie" returned "Landscape Canvas Tote Bag" because the old "match ANY word" logic was too loose.
+
+**New Behavior:** The tiered search returns results in order of confidence, and fuzzy matches must pass `validateMatch()` which requires at least 50% of search words to overlap with the product name.
+
+### Match Validation Function
+
+```javascript
+function validateMatch(searchTerm, foundProductName) {
+  const searchWords = searchTerm.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+  const productWords = foundProductName.toLowerCase().split(/\s+/);
+
+  // Calculate word overlap
+  const matchingWords = searchWords.filter(sw =>
+    productWords.some(pw => pw.includes(sw) || sw.includes(pw))
+  );
+
+  // Require at least 50% of search words to match
+  const overlapRatio = matchingWords.length / searchWords.length;
+  return overlapRatio >= 0.5;
+}
 ```
+
+### Lead Time Fallback
+
+When pricing is not found for the default lead time (`local`), the system automatically tries:
+1. `local` (5-10 working days)
+2. `overseas_air` (10-15 working days)
+3. `overseas_sea` (20-35 working days)
+
+This ensures products with only overseas pricing are still returned.
 
 ---
 
@@ -651,13 +773,63 @@ PRICE_AGENT_API_KEY=your-internal-api-key
 
 ## Integration with Orchestrator
 
-### How Orchestrator Calls Price Agent
+### Recommended: Use /api/price/batch with Canonical Names
+
+The Orchestrator should:
+1. Extract product mentions from the ticket
+2. Resolve them to canonical names via Product Agent (`/api/product/resolve`)
+3. Call Price Agent's `/api/price/batch` with the canonical names
 
 ```javascript
 // In orchestrator's price-agent.js
 
 const axios = require('axios');
 
+/**
+ * Query Price Agent with canonical product names (recommended)
+ * Use this after resolving product names via Product Agent
+ */
+async function queryPriceAgentBatch(products, quantities, context) {
+  try {
+    const response = await axios.post(
+      `${process.env.PRICE_AGENT_URL}/api/price/batch`,
+      {
+        products,    // Array of canonical names: ["Hooded Sweatshirt", "100% Cotton T-Shirt"]
+        quantities   // Object: { "Hooded Sweatshirt": 500, "100% Cotton T-Shirt": 1500 }
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${process.env.PRICE_AGENT_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 15000
+      }
+    );
+
+    // Check for fuzzy matches and warn
+    const fuzzyMatches = response.data.results.filter(r => r.matchType === 'fuzzy');
+    if (fuzzyMatches.length > 0) {
+      console.warn('Price Agent returned fuzzy matches - verify products:',
+        fuzzyMatches.map(f => `${f.searchedTerm} → ${f.product?.name}`));
+    }
+
+    return response.data;
+  } catch (error) {
+    console.error('Price Agent error:', error.message);
+    return {
+      success: false,
+      error: {
+        code: 'PRICE_AGENT_UNAVAILABLE',
+        message: 'Could not retrieve pricing information'
+      }
+    };
+  }
+}
+
+/**
+ * Query Price Agent with natural language (legacy)
+ * Use for direct Discord bot queries
+ */
 async function queryPriceAgent(query, context) {
   try {
     const response = await axios.post(
@@ -677,7 +849,7 @@ async function queryPriceAgent(query, context) {
         timeout: 10000
       }
     );
-    
+
     return response.data;
   } catch (error) {
     console.error('Price Agent error:', error.message);
@@ -1203,7 +1375,39 @@ Railway Project: price-agent
 
 ## Testing
 
-### Backend API Test Queries
+### Batch Endpoint Test Cases (for Orchestrator)
+
+```bash
+# Test 1: Exact match with canonical name
+curl -X POST http://localhost:3001/api/price/batch \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"products": ["Silicone Wristband"], "quantities": {"Silicone Wristband": 500}}'
+# Expected: matchType = "exact"
+
+# Test 2: Multiple products
+curl -X POST http://localhost:3001/api/price/batch \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"products": ["Landscape Canvas Tote Bag", "Silicone Wristband"], "quantities": {"Landscape Canvas Tote Bag": 100, "Silicone Wristband": 500}}'
+# Expected: Both found with matchType = "exact"
+
+# Test 3: Unknown product (should NOT return random products)
+curl -X POST http://localhost:3001/api/price/batch \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"products": ["Unknown Product XYZ"], "quantities": {"Unknown Product XYZ": 100}}'
+# Expected: matchType = "not_found", no random products returned
+
+# Test 4: Fuzzy match scenario
+curl -X POST http://localhost:3001/api/price/batch \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"products": ["Canvas Tote Bag"], "quantities": {"Canvas Tote Bag": 100}}'
+# Expected: matchType = "fuzzy", warning = "Matched via fuzzy search..."
+```
+
+### Backend API Test Queries (Natural Language via /api/price/query)
 
 | Query | Expected Result |
 |-------|-----------------|
@@ -1212,6 +1416,7 @@ Railway Project: price-agent
 | "Price list for A4 Canvas Cream Tote Bag" | Returns all print options and tiers |
 | "500 black tote bags 2 color print" | Returns A4 Canvas Black Tote Bag, silkscreen 2c x 0c, $2.73/pc |
 | "cheapest tote bag option" | Returns No Print option with lowest price tier |
+| "t-shirt and hoodie 500 pcs" | Returns empty results (NOT tote bags!) - Bug fix verified |
 
 ### Discord Bot Test Cases
 
