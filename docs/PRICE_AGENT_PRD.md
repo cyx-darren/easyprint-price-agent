@@ -1,5 +1,28 @@
 # Price Agent - Product Requirements Document
 
+## Implementation Status
+
+> **Last Updated:** December 2024
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| **Backend API** | ✅ Complete | Express.js server deployed on Railway |
+| **Database Schema** | ✅ Complete | products + pricing tables in Supabase |
+| **POST /api/price/query** | ✅ Complete | Natural language queries via Claude |
+| **POST /api/price/batch** | ✅ Complete | Canonical name lookup for Orchestrator |
+| **POST /api/price/lookup** | ✅ Complete | Direct structured lookup |
+| **GET /api/price/products** | ✅ Complete | List products with pagination |
+| **GET /api/price/product/:name/tiers** | ✅ Complete | Pricing tiers for product |
+| **GET /api/price/moq/:productName** | ✅ Complete | MOQ information |
+| **Tiered Search** | ✅ Complete | Exact → Case-insensitive → Fuzzy w/ validation |
+| **Lead Time Fallback** | ✅ Complete | local → overseas_air → overseas_sea |
+| **Discord Bot** | ✅ Complete | !price command with embed responses |
+| **Data Import** | ✅ Complete | CSV parsed and imported to Supabase |
+| **Request/Response Logging** | ✅ Complete | Detailed logging on all endpoints |
+| **Authentication** | ✅ Complete | Bearer token middleware |
+
+---
+
 ## Overview
 
 ### Project Context
@@ -85,42 +108,52 @@ The Price Agent has **two components**: a Discord bot and an API backend.
 | LLM | Claude (Anthropic) - for query understanding |
 | Hosting | Railway |
 
-### Project Structure
+### Project Structure (Implemented)
 ```
-price-agent/
-├── discord-bot/               # Discord bot for !price command
+price-agent-v1/
+├── backend/                        # Express API server ✅
 │   ├── src/
-│   │   ├── index.js           # Bot entry point
-│   │   ├── commands/
-│   │   │   └── price.js       # !price command handler
-│   │   ├── services/
-│   │   │   └── priceApi.js    # Calls backend API
-│   │   └── utils/
-│   │       └── formatters.js  # Discord message formatting
-│   ├── package.json
-│   └── Dockerfile
-│
-├── backend/                   # Express API server
-│   ├── src/
-│   │   ├── server.js          # Express server entry point
+│   │   ├── server.js               # Express server entry point
 │   │   ├── routes/
-│   │   │   └── pricing.js     # API route handlers
+│   │   │   └── pricing.js          # All API route handlers (6 endpoints)
 │   │   ├── services/
-│   │   │   ├── supabase.js    # Supabase client
-│   │   │   ├── productSearch.js   # Product matching logic
-│   │   │   ├── priceQuery.js      # Pricing lookup logic
-│   │   │   └── queryParser.js     # Natural language → structured query (Claude)
+│   │   │   ├── supabase.js         # Supabase client configuration
+│   │   │   ├── productSearch.js    # Tiered product search logic
+│   │   │   ├── priceQuery.js       # Pricing lookup & MOQ logic
+│   │   │   └── queryParser.js      # Claude-based NL parsing
 │   │   └── utils/
-│   │       └── formatters.js  # Response formatting
-│   ├── package.json
-│   └── Dockerfile
+│   │       └── formatters.js       # API response formatting
+│   ├── package.json                # Dependencies: express, @supabase/supabase-js, @anthropic-ai/sdk
+│   └── node_modules/
 │
-├── scripts/
-│   └── importData.js          # CSV import script
-├── data/
-│   └── pricing.csv            # Source pricing data
-├── .env.example
-└── railway.json               # Multi-service Railway config
+├── discord-bot/                    # Discord bot for !price command ✅
+│   ├── src/
+│   │   ├── index.js                # Bot entry point (ES modules)
+│   │   ├── commands/
+│   │   │   └── price.js            # !price command handler
+│   │   ├── services/
+│   │   │   └── priceApi.js         # Axios client for backend API
+│   │   └── utils/
+│   │       └── formatters.js       # Discord embed formatting
+│   ├── package.json                # Dependencies: discord.js, axios, dotenv
+│   └── node_modules/
+│
+├── scripts/                        # Data import utilities ✅
+│   ├── importData.js               # Main CSV import script
+│   ├── parseAndGenerateSQL.js      # CSV → SQL generator
+│   ├── generatePricingSQL.js       # Pricing SQL generator
+│   ├── generateBulkSQL.js          # Bulk insert generator
+│   └── generateSmallBatchSQL.js    # Small batch generator
+│
+├── imported_pricing/               # Source pricing data ✅
+│   └── pricing.csv                 # EasyPrint pricing CSV (103KB)
+│
+├── docs/
+│   ├── PRICE_AGENT_PRD.md          # This document
+│   └── DATA_IMPORT_INSTRUCTIONS.md # CSV parsing documentation
+│
+├── .gitignore
+└── railway.json                    # Railway deployment config
 ```
 
 ---
@@ -603,27 +636,35 @@ Health check endpoint.
 
 ## Query Parsing Logic
 
-The Price Agent uses Claude to parse natural language queries into structured parameters.
+The Price Agent uses Claude (claude-sonnet-4-20250514) to parse natural language queries into structured parameters.
 
-### Claude Prompt Template
-```
-You are a query parser for a corporate gifts pricing system.
+### Claude Prompt Template (Implemented)
+```javascript
+// From backend/src/services/queryParser.js
+
+const systemPrompt = `You are a query parser for a corporate gifts pricing system.
 
 Extract the following from the user's query:
 - product: The product name or type (e.g., "canvas tote bag", "tumbler", "notebook")
 - quantity: The number of items requested (null if not specified)
-- print_option: The printing method if mentioned (e.g., "silkscreen", "heat transfer", "no print")
+- print_option: The FULL printing specification including color count. Examples:
+  - "silkscreen 1c x 0c" means 1 color front, 0 colors back
+  - "silkscreen 2c x 1c" means 2 colors front, 1 color back
+  - "heat transfer" for full color heat transfer
+  - "no print" for blank items
+  - Keep the exact color notation like "1c x 0c", "2c x 2c" if mentioned
 - lead_time: The delivery preference if mentioned ("local", "overseas", "urgent", "standard")
-
-User Query: "{query}"
 
 Respond in JSON format only:
 {
   "product": "...",
   "quantity": null or number,
-  "print_option": null or "...",
+  "print_option": null or "..." (include full spec like "silkscreen 1c x 0c"),
   "lead_time": null or "..."
-}
+}`;
+
+// Model: claude-sonnet-4-20250514
+// Max tokens: 256
 ```
 
 ### Fuzzy Matching Rules
@@ -639,30 +680,81 @@ Respond in JSON format only:
 
 ---
 
-## Product Search Logic
+## Product Search Logic (Implemented)
 
 ### Tiered Search Strategy
 
-The Price Agent uses a strict 3-tier search strategy to prevent returning wrong products:
+The Price Agent uses a strict 3-tier search strategy to prevent returning wrong products.
 
-| Tier | Method | Description |
-|------|--------|-------------|
-| 1 | **Exact Match** | Case-sensitive `.eq('name', query)` |
-| 2 | **Case-Insensitive Exact** | `.ilike('name', query)` - no wildcards |
-| 3 | **Fuzzy Match + Validation** | Contains search with 50% word overlap validation |
+**File:** `backend/src/services/productSearch.js`
 
-### Why This Matters
+| Tier | Method | Supabase Query | Description |
+|------|--------|----------------|-------------|
+| 1 | **Exact Match** | `.eq('name', query)` | Case-sensitive exact match |
+| 2 | **Case-Insensitive Exact** | `.ilike('name', query)` | No wildcards, just case-insensitive |
+| 3 | **Fuzzy Match + Validation** | `.ilike('name', '%word%')` for ALL words | Contains search with 50% word overlap validation |
 
-**Previous Bug:** Searching "t-shirt and hoodie" returned "Landscape Canvas Tote Bag" because the old "match ANY word" logic was too loose.
+### Implementation
 
-**New Behavior:** The tiered search returns results in order of confidence, and fuzzy matches must pass `validateMatch()` which requires at least 50% of search words to overlap with the product name.
+```javascript
+// From backend/src/services/productSearch.js
+
+async function searchProducts(query, options = {}) {
+  const { limit = 10, category = null } = options;
+  const searchTerm = query.trim();
+
+  console.log(`[SEARCH] Searching for: "${searchTerm}"`);
+
+  // Tier 1: Exact match (case-sensitive)
+  let result = await searchExact(searchTerm, category, limit);
+  if (result.length > 0) {
+    console.log(`[SEARCH] Found ${result.length} exact match(es)`);
+    return result.map(r => ({ ...r, matchType: 'exact' }));
+  }
+
+  // Tier 2: Case-insensitive exact match (no wildcards)
+  result = await searchExactInsensitive(searchTerm, category, limit);
+  if (result.length > 0) {
+    console.log(`[SEARCH] Found ${result.length} case-insensitive exact match(es)`);
+    return result.map(r => ({ ...r, matchType: 'exact_insensitive' }));
+  }
+
+  // Tier 3: Fuzzy match with validation
+  result = await searchFuzzy(searchTerm, category, limit);
+  const validated = result.filter(r => validateMatch(searchTerm, r.name));
+
+  if (validated.length > 0) {
+    console.log(`[SEARCH] Found ${validated.length} validated fuzzy match(es)`);
+    return validated.map(r => ({ ...r, matchType: 'fuzzy' }));
+  }
+
+  console.log(`[SEARCH] No matches found for "${searchTerm}"`);
+  return [];
+}
+```
+
+### Match Type Response
+
+Each product result includes a `matchType` field:
+
+| matchType | Description | Confidence |
+|-----------|-------------|------------|
+| `exact` | Case-sensitive exact match | Highest |
+| `exact_insensitive` | Case-insensitive exact match | High |
+| `fuzzy` | Validated fuzzy match (50%+ overlap) | Medium (includes warning) |
+| `not_found` | No matching product found | N/A |
 
 ### Match Validation Function
 
 ```javascript
+// Prevents returning wrong products for queries like "t-shirt and hoodie"
+
 function validateMatch(searchTerm, foundProductName) {
   const searchWords = searchTerm.toLowerCase().split(/\s+/).filter(w => w.length > 2);
   const productWords = foundProductName.toLowerCase().split(/\s+/);
+
+  // If no significant search words, accept the match
+  if (searchWords.length === 0) return true;
 
   // Calculate word overlap
   const matchingWords = searchWords.filter(sw =>
@@ -671,16 +763,37 @@ function validateMatch(searchTerm, foundProductName) {
 
   // Require at least 50% of search words to match
   const overlapRatio = matchingWords.length / searchWords.length;
-  return overlapRatio >= 0.5;
+
+  if (overlapRatio < 0.5) {
+    console.warn(`[SEARCH] Rejecting low-confidence match: "${searchTerm}" → "${foundProductName}" (${(overlapRatio * 100).toFixed(0)}% overlap)`);
+    return false;
+  }
+
+  return true;
 }
 ```
 
-### Lead Time Fallback
+### Lead Time Fallback (Implemented)
 
-When pricing is not found for the default lead time (`local`), the system automatically tries:
-1. `local` (5-10 working days)
-2. `overseas_air` (10-15 working days)
-3. `overseas_sea` (20-35 working days)
+When pricing is not found for the default lead time (`local`), the system automatically falls back:
+
+```javascript
+// From backend/src/routes/pricing.js
+
+// Fallback: If no local pricing found, try overseas_air
+if (results.length === 0 && leadTimeType === 'local') {
+  console.log('[PRICE-QUERY] No local pricing found, trying overseas_air...');
+  leadTimeType = 'overseas_air';
+  results = await getPricingForProducts({ products, quantity, printOption, leadTimeType });
+
+  // Fallback: If still no results, try overseas_sea
+  if (results.length === 0) {
+    console.log('[PRICE-QUERY] No overseas_air pricing found, trying overseas_sea...');
+    leadTimeType = 'overseas_sea';
+    results = await getPricingForProducts({ products, quantity, printOption, leadTimeType });
+  }
+}
+```
 
 This ensures products with only overseas pricing are still returned.
 
@@ -982,13 +1095,16 @@ Did you mean one of these?
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-### Discord Bot Implementation
+### Discord Bot Implementation (ES Modules)
+
+**Note:** The Discord bot uses ES modules (`"type": "module"` in package.json).
 
 #### Bot Entry Point (discord-bot/src/index.js)
 
 ```javascript
-const { Client, GatewayIntentBits, Collection } = require('discord.js');
-const priceCommand = require('./commands/price');
+import 'dotenv/config';
+import { Client, GatewayIntentBits } from 'discord.js';
+import priceCommand from './commands/price.js';
 
 const client = new Client({
   intents: [
@@ -998,15 +1114,14 @@ const client = new Client({
   ],
 });
 
-// Command prefix
 const PREFIX = '!';
 
 client.once('ready', () => {
   console.log(`Price Agent Bot logged in as ${client.user.tag}`);
+  console.log(`Connected to ${client.guilds.cache.size} guild(s)`);
 });
 
 client.on('messageCreate', async (message) => {
-  // Ignore bots and messages without prefix
   if (message.author.bot) return;
   if (!message.content.startsWith(PREFIX)) return;
 
@@ -1018,87 +1133,91 @@ client.on('messageCreate', async (message) => {
   }
 });
 
+client.on('error', (error) => {
+  console.error('Discord client error:', error);
+});
+
 client.login(process.env.DISCORD_BOT_TOKEN);
 ```
 
 #### Price Command Handler (discord-bot/src/commands/price.js)
 
 ```javascript
-const priceApi = require('../services/priceApi');
-const { formatPriceResponse, formatErrorResponse } = require('../utils/formatters');
+import priceApi from '../services/priceApi.js';
+import { formatPriceResponse, formatErrorResponse } from '../utils/formatters.js';
 
-module.exports = {
+export default {
   name: 'price',
   description: 'Get pricing for corporate gift products',
-  
+
   async execute(message, args) {
     if (!args.length) {
       return message.reply(
-        '❌ Please specify a product.\n' +
+        '**Please specify a product.**\n' +
         'Usage: `!price <product> [quantity] [print option]`\n' +
         'Example: `!price canvas tote bag 500 silkscreen`'
       );
     }
-    
+
     const query = args.join(' ');
-    
+
     try {
-      // Show typing indicator
       await message.channel.sendTyping();
-      
-      // Call Price Agent Backend API
+
       const response = await priceApi.query(query, {
         discordUserId: message.author.id,
-        discordChannelId: message.channel.id
+        discordChannelId: message.channel.id,
       });
-      
+
       if (response.success) {
-        const formattedResponse = formatPriceResponse(response.data);
+        const formattedResponse = formatPriceResponse(response.data, response.meta);
         await message.reply(formattedResponse);
       } else {
         const errorResponse = formatErrorResponse(response.error);
         await message.reply(errorResponse);
       }
-      
     } catch (error) {
       console.error('Price command error:', error);
-      await message.reply('❌ Could not fetch pricing. Please try again later.');
+      await message.reply('Could not fetch pricing. Please try again later.');
     }
-  }
+  },
 };
 ```
 
 #### Backend API Client (discord-bot/src/services/priceApi.js)
 
 ```javascript
-const axios = require('axios');
+import axios from 'axios';
 
 const apiClient = axios.create({
   baseURL: process.env.PRICE_AGENT_BACKEND_URL || 'http://localhost:3001',
   timeout: 15000,
   headers: {
     'Content-Type': 'application/json',
-    'Authorization': `Bearer ${process.env.PRICE_AGENT_API_KEY}`
-  }
+    Authorization: `Bearer ${process.env.PRICE_AGENT_API_KEY}`,
+  },
 });
 
-module.exports = {
+export default {
   async query(queryText, context = {}) {
     try {
       const response = await apiClient.post('/api/price/query', {
         query: queryText,
         context: {
           source: 'discord_bot',
-          ...context
-        }
+          ...context,
+        },
       });
       return response.data;
     } catch (error) {
       console.error('Price API error:', error.message);
+      if (error.response) {
+        return error.response.data;
+      }
       throw error;
     }
   },
-  
+
   async lookup(params) {
     try {
       const response = await apiClient.post('/api/price/lookup', params);
@@ -1108,7 +1227,7 @@ module.exports = {
       throw error;
     }
   },
-  
+
   async getProductTiers(productName, printOption, leadTime) {
     try {
       const response = await apiClient.get(
@@ -1120,154 +1239,137 @@ module.exports = {
       console.error('Get tiers error:', error.message);
       throw error;
     }
-  }
+  },
 };
 ```
 
 #### Response Formatter (discord-bot/src/utils/formatters.js)
 
 ```javascript
-const { EmbedBuilder } = require('discord.js');
+import { EmbedBuilder } from 'discord.js';
 
-function formatPriceResponse(data) {
+export function formatPriceResponse(data, meta) {
   if (data.products_found === 0) {
     return formatNoResults(data);
   }
-  
-  if (data.products_found === 1) {
-    return formatSingleProduct(data.results[0]);
+
+  if (data.products_found === 1 && data.results && data.results[0]) {
+    return formatSingleProduct(data.results[0], data.alternatives);
   }
-  
-  return formatMultipleProducts(data.results);
+
+  if (data.results && data.results.length > 1) {
+    return formatMultipleProducts(data.results);
+  }
+
+  if (data.results && data.results.length === 1) {
+    return formatSingleProduct(data.results[0], data.alternatives);
+  }
+
+  return formatNoResults(data);
 }
 
-function formatSingleProduct(result) {
+function formatSingleProduct(result, alternatives) {
   const embed = new EmbedBuilder()
-    .setColor(0x00AA00)
-    .setTitle(`📦 ${result.product_name}`)
-    .setDescription(`📐 ${result.dimensions || 'N/A'}`)
-    .addFields(
-      { 
-        name: '🖨️ Print Option', 
-        value: result.print_option, 
-        inline: true 
-      },
-      { 
-        name: '📅 Lead Time', 
-        value: result.lead_time.description, 
-        inline: true 
-      },
-      { 
-        name: '\u200B', 
-        value: '\u200B', 
-        inline: true 
-      },
-      { 
-        name: '💰 Price', 
-        value: `**${result.pricing.requested_quantity} pcs @ $${result.pricing.unit_price}/pc**\nTotal: **$${result.pricing.total_price.toFixed(2)}**`, 
-        inline: false 
-      },
-      {
-        name: '📊 MOQ',
-        value: `${result.moq.quantity} pcs @ $${result.moq.unit_price}/pc`,
-        inline: true
-      }
-    );
-  
-  // Add quantity tiers as a code block for table formatting
+    .setColor(0x00aa00)
+    .setTitle(`${result.product_name}`)
+    .setDescription(result.dimensions ? `${result.dimensions}` : '');
+
+  if (result.print_option) {
+    embed.addFields({ name: 'Print Option', value: result.print_option, inline: true });
+  }
+
+  if (result.lead_time) {
+    embed.addFields({
+      name: 'Lead Time',
+      value: result.lead_time.description || `${result.lead_time.type}`,
+      inline: true,
+    });
+  }
+
+  if (result.pricing) {
+    const priceText =
+      `**${result.pricing.requested_quantity} pcs @ $${result.pricing.unit_price}/pc**\n` +
+      `Total: **$${result.pricing.total_price.toFixed(2)} ${result.pricing.currency || 'SGD'}**`;
+    embed.addFields({ name: 'Price', value: priceText, inline: false });
+  }
+
+  if (result.moq) {
+    embed.addFields({
+      name: 'MOQ',
+      value: `${result.moq.quantity} pcs @ $${result.moq.unit_price}/pc`,
+      inline: true,
+    });
+  }
+
   if (result.all_tiers && result.all_tiers.length > 0) {
     const tiersTable = result.all_tiers
-      .slice(0, 8) // Limit to 8 tiers to avoid message too long
-      .map(tier => {
-        const marker = tier.quantity === result.pricing.requested_quantity ? '→' : ' ';
-        const moqLabel = tier.quantity === result.moq.quantity ? ' (MOQ)' : '';
-        return `${marker} ${tier.quantity}${moqLabel}: $${tier.unit_price}/pc`;
+      .slice(0, 8)
+      .map((tier) => {
+        const marker = result.pricing && tier.quantity === result.pricing.requested_quantity ? '> ' : '  ';
+        const moqLabel = result.moq && tier.quantity === result.moq.quantity ? ' (MOQ)' : '';
+        return `${marker}${tier.quantity}${moqLabel}: $${tier.unit_price}/pc`;
       })
       .join('\n');
-    
-    embed.addFields({
-      name: '📊 Quantity Tiers',
-      value: '```\n' + tiersTable + '\n```',
-      inline: false
-    });
+
+    embed.addFields({ name: 'Quantity Tiers', value: '```\n' + tiersTable + '\n```', inline: false });
   }
-  
-  // Add alternatives if available
-  if (result.alternatives && result.alternatives.length > 0) {
-    const altText = result.alternatives
+
+  if (alternatives && alternatives.length > 0) {
+    const altText = alternatives
       .slice(0, 3)
-      .map(alt => `• ${alt.print_option} (from $${alt.moq_price})`)
+      .map((alt) => `- ${alt.print_option} (from $${alt.moq_price || alt.unit_price_at_500 || 'N/A'})`)
       .join('\n');
-    
-    embed.addFields({
-      name: '🔗 Other Print Options',
-      value: altText,
-      inline: false
-    });
+    embed.addFields({ name: 'Other Print Options', value: altText, inline: false });
   }
-  
-  embed.setFooter({ text: 'Prices before GST • EasyPrint' })
-    .setTimestamp();
-  
+
+  embed.setFooter({ text: 'Prices before GST | EasyPrint' }).setTimestamp();
   return { embeds: [embed] };
 }
 
 function formatMultipleProducts(results) {
   const embed = new EmbedBuilder()
-    .setColor(0x0099FF)
-    .setTitle(`🔍 Found ${results.length} products`)
+    .setColor(0x0099ff)
+    .setTitle(`Found ${results.length} products`)
     .setDescription('Be more specific for detailed pricing.');
-  
+
   results.slice(0, 5).forEach((result, index) => {
+    const moqInfo = result.moq
+      ? `MOQ: ${result.moq.quantity} pcs | Starting: $${result.moq.unit_price}/pc`
+      : '';
+    const dimensions = result.dimensions ? `${result.dimensions}` : '';
     embed.addFields({
-      name: `${index + 1}️⃣ ${result.product_name}`,
-      value: `📐 ${result.dimensions || 'N/A'}\nMOQ: ${result.moq.quantity} pcs | Starting: $${result.moq.unit_price}/pc`,
-      inline: false
+      name: `${index + 1}. ${result.product_name}`,
+      value: [dimensions, moqInfo].filter(Boolean).join('\n') || 'N/A',
+      inline: false,
     });
   });
-  
-  embed.addFields({
-    name: '💡 Tip',
-    value: 'Try: `!price A4 canvas cream tote 500 silkscreen`',
-    inline: false
-  });
-  
-  embed.setFooter({ text: 'Prices before GST • EasyPrint' })
-    .setTimestamp();
-  
+
+  embed.addFields({ name: 'Tip', value: 'Try: `!price A4 canvas cream tote 500 silkscreen`', inline: false });
+  embed.setFooter({ text: 'Prices before GST | EasyPrint' }).setTimestamp();
   return { embeds: [embed] };
 }
 
 function formatNoResults(data) {
   const embed = new EmbedBuilder()
-    .setColor(0xFF0000)
-    .setTitle('❌ No products found')
-    .setDescription(`No matches for your search.`);
-  
+    .setColor(0xff0000)
+    .setTitle('No products found')
+    .setDescription(data.meta?.message || 'No matches for your search.');
+
   if (data.suggestions && data.suggestions.length > 0) {
     embed.addFields({
       name: 'Did you mean?',
-      value: data.suggestions.map(s => `• ${s}`).join('\n'),
-      inline: false
+      value: data.suggestions.map((s) => `- ${s}`).join('\n'),
+      inline: false,
     });
   }
-  
+
   embed.setFooter({ text: 'Try a different search term' });
-  
   return { embeds: [embed] };
 }
 
-function formatErrorResponse(error) {
-  return `❌ **Error:** ${error.message || 'Something went wrong'}`;
+export function formatErrorResponse(error) {
+  return `**Error:** ${error.message || 'Something went wrong'}`;
 }
-
-module.exports = {
-  formatPriceResponse,
-  formatSingleProduct,
-  formatMultipleProducts,
-  formatNoResults,
-  formatErrorResponse
-};
 ```
 
 ---
@@ -1343,30 +1445,34 @@ Railway Project: price-agent
 
 ### Deployment Checklist
 
-**Phase 1: Database Setup**
-- [ ] Create Supabase project (or use existing)
-- [ ] Run SQL to create `products` and `pricing` tables
-- [ ] Import pricing data from CSV
-- [ ] Verify data with test queries
+**Phase 1: Database Setup** ✅ COMPLETE
+- [x] Create Supabase project (or use existing)
+- [x] Run SQL to create `products` and `pricing` tables
+- [x] Import pricing data from CSV (103KB pricing.csv)
+- [x] Verify data with test queries
 
-**Phase 2: Backend API**
-- [ ] Create Railway project "price-agent"
-- [ ] Add service "price-agent-backend" with root `/backend`
-- [ ] Set backend environment variables
-- [ ] Deploy and verify `/api/health` endpoint
-- [ ] Test API with sample queries via curl/Postman
+**Phase 2: Backend API** ✅ COMPLETE
+- [x] Create Railway project "price-agent"
+- [x] Add service "price-agent-backend" with root `/backend`
+- [x] Set backend environment variables
+- [x] Deploy and verify `/api/health` endpoint
+- [x] Test API with sample queries via curl/Postman
+- [x] Add detailed request/response logging
+- [x] Implement tiered search strategy
+- [x] Implement lead time fallback
 
-**Phase 3: Discord Bot**
-- [ ] Create Discord application at discord.dev
-- [ ] Create bot and get token
-- [ ] Add bot to EasyPrint Discord server
-- [ ] Add service "price-agent-discord-bot" with root `/discord-bot`
-- [ ] Set discord-bot environment variables
-- [ ] Set `PRICE_AGENT_BACKEND_URL` to Railway backend URL
-- [ ] Deploy and verify bot comes online
-- [ ] Test `!price` command in Discord
+**Phase 3: Discord Bot** ✅ COMPLETE
+- [x] Create Discord application at discord.dev
+- [x] Create bot and get token
+- [x] Add bot to EasyPrint Discord server
+- [x] Add service "price-agent-discord-bot" with root `/discord-bot`
+- [x] Set discord-bot environment variables
+- [x] Set `PRICE_AGENT_BACKEND_URL` to Railway backend URL
+- [x] Deploy and verify bot comes online
+- [x] Test `!price` command in Discord
+- [x] Implement Discord embed formatting
 
-**Phase 4: Integration**
+**Phase 4: Integration** 🔄 PENDING
 - [ ] Update Ticket Manager orchestrator with Price Agent backend URL
 - [ ] Test `!ticket` command with pricing questions
 - [ ] Verify both access methods work
@@ -1445,6 +1551,47 @@ Test that the orchestrator correctly calls Price Agent:
 
 ---
 
+## Logging (Implemented)
+
+All API endpoints include detailed request/response logging for debugging and monitoring.
+
+### Log Format
+
+```
+[ENDPOINT-NAME] ========== NEW REQUEST ==========
+[ENDPOINT-NAME] Key info about the request
+[ENDPOINT-NAME] Step-by-step processing info
+[ENDPOINT-NAME] ========== RESPONSE SENT (Xms) ==========
+[ENDPOINT-NAME] Summary of response
+```
+
+### Example Log Output
+
+```
+[PRICE-QUERY] ========== NEW REQUEST ==========
+[PRICE-QUERY] Query: "canvas tote bag 500 silkscreen"
+[PRICE-QUERY] Context: {"source":"discord_bot","discordUserId":"123"}
+[PRICE-QUERY] Parsed query:
+[PRICE-QUERY]   - Product: "canvas tote bag"
+[PRICE-QUERY]   - Quantity: 500
+[PRICE-QUERY]   - Print option: "silkscreen"
+[PRICE-QUERY]   - Lead time: "local"
+[SEARCH] Searching for: "canvas tote bag"
+[SEARCH] Found 4 validated fuzzy match(es) (rejected 0)
+[PRICE-QUERY] Product search results (4 found, matchType: fuzzy):
+[PRICE-QUERY]   1. A4 Canvas Cream Tote Bag (ID: uuid-1)
+[PRICE-QUERY]   2. A4 Canvas Black Tote Bag (ID: uuid-2)
+[PRICE-QUERY] Pricing results:
+[PRICE-QUERY]   1. Product: "A4 Canvas Cream Tote Bag"
+[PRICE-QUERY]      Print: silkscreen print - 1c x 0c | Lead time: local
+[PRICE-QUERY]      Quantity: 500 | Unit price: $2.01 | Total: $1005
+[PRICE-QUERY]      MOQ: 30 @ $4.42/unit
+[PRICE-QUERY] ========== RESPONSE SENT (145ms) ==========
+[PRICE-QUERY] Success: true | Products: 1 | Alternatives: 3 | MatchType: fuzzy
+```
+
+---
+
 ## Future Enhancements (Out of Scope for v1)
 
 - [ ] Price comparison across similar products
@@ -1455,8 +1602,32 @@ Test that the orchestrator correctly calls Price Agent:
 
 ---
 
+## Changelog
+
+### December 2024
+
+**v1.0.0 - Initial Release**
+- ✅ Backend API with all 6 endpoints
+- ✅ Discord bot with `!price` command
+- ✅ Tiered search strategy (Exact → Case-insensitive → Fuzzy)
+- ✅ Match validation (50% word overlap requirement)
+- ✅ Lead time fallback (local → overseas_air → overseas_sea)
+- ✅ Match type tracking in responses
+- ✅ Detailed request/response logging
+- ✅ Data import from CSV to Supabase
+- ✅ Authentication middleware
+- ✅ Discord embed formatting
+
+**Bug Fixes**
+- Fixed: "t-shirt and hoodie" no longer returns "Canvas Tote Bag" (tiered search)
+- Fixed: Overseas-only products now return pricing (lead time fallback)
+- Fixed: Logging now shows correct property paths
+
+---
+
 ## Related Documents
 
-- `DATA_IMPORT_INSTRUCTIONS.md` - CSV parsing rules for initial data import
+- `CSV_UPLOAD_GUIDE.md` - Step-by-step guide for uploading pricing data from CSV files
+- `DATA_IMPORT_INSTRUCTIONS.md` - CSV parsing rules and format documentation
 - `ai-ticket-manager-project-knowledge.md` - Overall system architecture
 - Orchestrator PRD (in ai-ticket-manager repo)
