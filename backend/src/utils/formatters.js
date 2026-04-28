@@ -25,6 +25,32 @@ function formatQueryResponse(data, meta) {
 }
 
 /**
+ * Format a successful sample pricing query response
+ *
+ * @param {object} data - Sample pricing data
+ * @param {object} meta - Metadata
+ * @returns {object} Formatted response
+ */
+function formatSamplePricingResponse(data, meta) {
+  return {
+    success: true,
+    data: {
+      query_type: 'sample_pricing',
+      samples_found: data.sampleResults?.length || 0,
+      sample_results: data.sampleResults || [],
+      suggestions: data.suggestions || []
+    },
+    meta: {
+      query_type: 'sample_pricing',
+      query: meta.query || null,
+      processing_time_ms: meta.processingTime || 0,
+      message: meta.message || null,
+      warning: meta.warning || null
+    }
+  };
+}
+
+/**
  * Format a successful lookup response
  *
  * @param {object} pricing - Pricing data
@@ -92,6 +118,7 @@ function formatErrorResponse(code, message) {
 
 module.exports = {
   formatQueryResponse,
+  formatSamplePricingResponse,
   formatLookupResponse,
   formatTiersResponse,
   formatErrorResponse

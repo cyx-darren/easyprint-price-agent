@@ -16,7 +16,12 @@ const {
   getAlternatives
 } = require('../services/priceQuery');
 const {
+  isSamplePricingQuery,
+  searchSamplePricing
+} = require('../services/samplePricing');
+const {
   formatQueryResponse,
+  formatSamplePricingResponse,
   formatLookupResponse,
   formatTiersResponse,
   formatErrorResponse
@@ -63,6 +68,33 @@ router.post('/query', async (req, res) => {
       return res.status(400).json(
         formatErrorResponse('MISSING_PARAMETERS', 'Query is required')
       );
+    }
+
+    if (isSamplePricingQuery(query)) {
+      console.log('[PRICE-QUERY] Sample pricing query detected');
+      const sampleResults = await searchSamplePricing(query, { limit: 5 });
+
+      console.log(`[PRICE-QUERY] Sample pricing results: ${sampleResults.length}`);
+      sampleResults.forEach((result, i) => {
+        const fee = result.fee.amount_ex_gst === null
+          ? 'supplier check'
+          : `$${result.fee.amount_ex_gst}`;
+        console.log(`[PRICE-QUERY]   ${i + 1}. ${result.item_name} - ${fee}`);
+      });
+      console.log(`[PRICE-QUERY] ========== RESPONSE SENT (${Date.now() - startTime}ms) ==========`);
+
+      return res.json(formatSamplePricingResponse(
+        {
+          sampleResults
+        },
+        {
+          query,
+          processingTime: Date.now() - startTime,
+          message: sampleResults.length > 0
+            ? null
+            : 'No matching sample pricing rule found'
+        }
+      ));
     }
 
     // Step 1: Parse the natural language query

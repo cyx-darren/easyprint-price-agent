@@ -7,10 +7,13 @@ export default {
 
   async execute(message, args) {
     if (!args.length) {
+      const botName = message.client.user?.username || 'Easyprint-Price-Agent';
+
       return message.reply(
         '**Please specify a product.**\n' +
-        'Usage: `!price <product> [quantity] [print option]`\n' +
-        'Example: `!price canvas tote bag 500 silkscreen`'
+        `Usage: \`@${botName} <product> [quantity] [print option]\`\n` +
+        `Example: \`@${botName} canvas tote bag 500 silkscreen\`\n` +
+        `Sample fees: \`@${botName} sample fee of postcard\``
       );
     }
 

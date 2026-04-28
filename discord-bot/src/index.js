@@ -10,24 +10,25 @@ const client = new Client({
   ],
 });
 
-const PREFIX = '!';
-
 client.once('ready', () => {
   console.log(`Price Agent Bot logged in as ${client.user.tag}`);
   console.log(`Connected to ${client.guilds.cache.size} guild(s)`);
 });
 
 client.on('messageCreate', async (message) => {
-  // Ignore bots and messages without prefix
   if (message.author.bot) return;
-  if (!message.content.startsWith(PREFIX)) return;
+  if (!client.user || !message.mentions.users.has(client.user.id)) return;
 
-  const args = message.content.slice(PREFIX.length).trim().split(/ +/);
-  const command = args.shift().toLowerCase();
+  const mentionPattern = new RegExp(`<@!?${client.user.id}>`, 'g');
+  const query = message.content
+    .replace(mentionPattern, ' ')
+    .trim()
+    .replace(/^[:,\-\s]+/, '')
+    .replace(/^!?price\b[:,\-\s]*/i, '')
+    .replace(/^pricing\b[:,\-\s]*/i, '')
+    .trim();
 
-  if (command === 'price') {
-    await priceCommand.execute(message, args);
-  }
+  await priceCommand.execute(message, query ? query.split(/\s+/) : []);
 });
 
 client.on('error', (error) => {
