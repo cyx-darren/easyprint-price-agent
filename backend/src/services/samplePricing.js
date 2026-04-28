@@ -125,11 +125,13 @@ function scoreRow(row, queryTokens, preferredSampleType) {
   const rowTokens = getRowTokens(row);
   let score = row.sample_type === preferredSampleType ? 2 : -2;
   let matchedTokens = 0;
+  let exactMatches = 0;
 
   for (const token of queryTokens) {
     if (rowTokens.has(token)) {
       score += 3;
       matchedTokens += 1;
+      exactMatches += 1;
       continue;
     }
 
@@ -145,7 +147,7 @@ function scoreRow(row, queryTokens, preferredSampleType) {
     }
   }
 
-  return { score, matchedTokens };
+  return { score, matchedTokens, exactMatches };
 }
 
 function findFallbackRule(rows, preferredSampleType, queryTokens) {
@@ -196,6 +198,7 @@ function formatSampleRow(row, match = null) {
       ? {
           score: match.score,
           matched_tokens: match.matchedTokens,
+          exact_matches: match.exactMatches,
         }
       : null,
   };
@@ -242,7 +245,7 @@ async function searchSamplePricing(query, options = {}) {
   }
 
   const rows = data || [];
-  const scoredRows = rows
+  let scoredRows = rows
     .map((row) => ({
       row,
       match: scoreRow(row, queryTokens, preferredSampleType),
@@ -254,6 +257,15 @@ async function searchSamplePricing(query, options = {}) {
       && match.score > 0
     ))
     .sort((a, b) => b.match.score - a.match.score || a.row.item_name.localeCompare(b.row.item_name));
+
+  const bestExactMatchCount = scoredRows.reduce(
+    (max, { match }) => Math.max(max, match.exactMatches),
+    0
+  );
+
+  if (bestExactMatchCount > 0) {
+    scoredRows = scoredRows.filter(({ match }) => match.exactMatches === bestExactMatchCount);
+  }
 
   if (scoredRows.length > 0) {
     return scoredRows.slice(0, limit).map(({ row, match }) => formatSampleRow(row, match));
