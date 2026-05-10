@@ -22,3 +22,6 @@ Thumbs.db
 # Build output
 dist/
 build/
+
+# Supabase CLI local state
+supabase/.temp/
