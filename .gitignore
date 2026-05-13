@@ -25,3 +25,6 @@ build/
 
 # Supabase CLI local state
 supabase/.temp/
+
+# Local Playwright MCP snapshots/logs
+.playwright-mcp/
