@@ -214,6 +214,7 @@ This catalog describes the public tables currently used by the `easyprint-price-
 | `dealers_fg_stock_snapshots` | Historical Dealers FG stock rows tied to an import run. | Use to audit stock changes over time. |
 | `dealers_fg_stock_import_runs` | Audit table for Dealers FG stock imports, including source sheet metadata, status, and parse counts. | Check this before trusting the latest imported stock balances. |
 | `orensport_products` | OrenSport agent price rows parsed from the Singapore PDF price list. Includes split item series codes, raw PDF item-code cell, sizes, agent price, combined 4XL/5XL/7XL price, product details, price variant, source page/row, and manual category fields. | Use for OrenSport supplier-cost lookup. Preserve duplicate item-series rows when they represent promotion or WSL variants. |
+| `venue31_charges` | Venue31 embroidery charge rules by embroidery size bucket and quantity tier. Includes per-piece SGD pricing for within `8cm x 8cm` and bigger-than-`8cm x 8cm` embroidery. | Use for Venue31 embroidery cost calculations. Quantities below 30 are quote-required; tiers are `30-99`, `100-249`, and `250+`. |
 | `sunprint_charges` | SUNPRINT charge rules by charge group, product category, print method/spec, position, size label, quantity range, charge type, amount, and source doc. | Use for SUNPRINT print cost calculations. |
 | `sunprint_category_mappings` | Mapping rules from products/categories/supplier codes/size thresholds to SUNPRINT product categories and defaults. | Resolve catalogue products to SUNPRINT charge rows. |
 | `plsilkscreen_charges` | PL Silkscreen charge rules by product category, print method, position type, size constraints, colour count, quantity range, charge type, and amount. | Use for PL Silkscreen and pad-printing cost calculations. |
@@ -280,6 +281,7 @@ This catalog describes the public tables currently used by the `easyprint-price-
 - `20260513150000_create_ultifresh_products.sql` creates isolated Ultifresh PDF product import tables.
 - `20260513150500_prepare_ultifresh_import_access.sql` creates scoped temporary import policies for controlled anon-key Ultifresh imports.
 - `20260513151000_remove_ultifresh_import_access.sql` removes the scoped temporary Ultifresh import policies after the controlled import.
+- `20260513160000_create_venue31_charges.sql` creates Venue31 embroidery charge tiers with RLS enabled and no public policies.
 - The first benchmark snapshot batch imported from the Google Sheet is dated `2026-05-10` and contains `12,806` rows.
 
 ## MYGIFT Product Scrape
