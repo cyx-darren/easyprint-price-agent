@@ -51,6 +51,31 @@ function formatSamplePricingResponse(data, meta) {
 }
 
 /**
+ * Format a heat transfer (dye sublimation) lanyard pricing response
+ *
+ * @param {object} data - Lanyard quote data from lanyardPricing service
+ * @param {object} meta - Metadata
+ * @returns {object} Formatted response
+ */
+function formatLanyardPricingResponse(data, meta) {
+  return {
+    success: true,
+    data: {
+      query_type: 'heat_transfer_lanyard',
+      result: data.result || null,
+      suggestions: data.suggestions || []
+    },
+    meta: {
+      query_type: 'heat_transfer_lanyard',
+      query: meta.query || null,
+      processing_time_ms: meta.processingTime || 0,
+      message: meta.message || null,
+      warning: meta.warning || null
+    }
+  };
+}
+
+/**
  * Format a successful lookup response
  *
  * @param {object} pricing - Pricing data
@@ -119,6 +144,7 @@ function formatErrorResponse(code, message) {
 module.exports = {
   formatQueryResponse,
   formatSamplePricingResponse,
+  formatLanyardPricingResponse,
   formatLookupResponse,
   formatTiersResponse,
   formatErrorResponse

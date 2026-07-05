@@ -1,5 +1,12 @@
 const { supabase } = require('./supabase');
 
+function applyProductFilter(queryBuilder, { productId, productName }) {
+  if (productId) {
+    return queryBuilder.eq('product_id', productId);
+  }
+  return queryBuilder.eq('product_name', productName);
+}
+
 /**
  * Get pricing for a specific product variant at a given quantity
  * Returns the tier that matches or is just below the requested quantity
@@ -12,21 +19,20 @@ const { supabase } = require('./supabase');
  * @returns {Promise<object>} Pricing result
  */
 async function getPriceForQuantity(params) {
-  const { productName, printOption, leadTimeType = 'local', quantity } = params;
+  const { productId, productName, printOption, leadTimeType = 'local', quantity } = params;
 
   if (!supabase) {
     throw new Error('Database not configured');
   }
 
-  if (!productName) {
-    throw new Error('Product name is required');
+  if (!productId && !productName) {
+    throw new Error('Product id or product name is required');
   }
 
   // Build query to find the tier at or below requested quantity
-  let queryBuilder = supabase
+  let queryBuilder = applyProductFilter(supabase
     .from('pricing')
-    .select('*')
-    .eq('product_name', productName);
+    .select('*'), { productId, productName });
 
   if (printOption) {
     queryBuilder = queryBuilder.eq('print_option', printOption);
@@ -51,14 +57,17 @@ async function getPriceForQuantity(params) {
 
   if (!data || data.length === 0) {
     // Try to get MOQ tier if quantity is below minimum
-    const { data: moqData, error: moqError } = await supabase
+    let moqQuery = applyProductFilter(supabase
       .from('pricing')
-      .select('*')
-      .eq('product_name', productName)
-      .eq('print_option', printOption || '')
+      .select('*'), { productId, productName })
       .eq('lead_time_type', leadTimeType)
-      .eq('is_moq', true)
-      .limit(1);
+      .eq('is_moq', true);
+
+    if (printOption) {
+      moqQuery = moqQuery.eq('print_option', printOption);
+    }
+
+    const { data: moqData, error: moqError } = await moqQuery.limit(1);
 
     if (moqError || !moqData || moqData.length === 0) {
       return null;
@@ -90,20 +99,19 @@ async function getPriceForQuantity(params) {
  * @returns {Promise<object>} All pricing tiers with lead time info
  */
 async function getAllPricingTiers(params) {
-  const { productName, printOption, leadTimeType = 'local' } = params;
+  const { productId, productName, printOption, leadTimeType = 'local' } = params;
 
   if (!supabase) {
     throw new Error('Database not configured');
   }
 
-  if (!productName) {
-    throw new Error('Product name is required');
+  if (!productId && !productName) {
+    throw new Error('Product id or product name is required');
   }
 
-  let queryBuilder = supabase
+  let queryBuilder = applyProductFilter(supabase
     .from('pricing')
-    .select('*')
-    .eq('product_name', productName)
+    .select('*'), { productId, productName })
     .order('quantity', { ascending: true });
 
   if (printOption) {
@@ -237,6 +245,95 @@ async function getMOQInfo(productName) {
   };
 }
 
+async function getMOQInfoForProduct(product) {
+  if (!product) return null;
+  return getMOQInfoByIdentity({
+    productId: product.id,
+    productName: product.name
+  });
+}
+
+async function getMOQInfoByIdentity({ productId, productName }) {
+  if (!supabase) {
+    throw new Error('Database not configured');
+  }
+
+  if (!productId && !productName) {
+    throw new Error('Product id or product name is required');
+  }
+
+  const { data, error } = await applyProductFilter(supabase
+    .from('pricing')
+    .select('*'), { productId, productName })
+    .eq('is_moq', true)
+    .order('unit_price', { ascending: true });
+
+  if (error) {
+    throw new Error(`Database error: ${error.message}`);
+  }
+
+  if (!data || data.length === 0) {
+    const { data: fallbackData, error: fallbackError } = await applyProductFilter(supabase
+      .from('pricing')
+      .select('*'), { productId, productName })
+      .order('quantity', { ascending: true });
+
+    if (fallbackError || !fallbackData || fallbackData.length === 0) {
+      return null;
+    }
+
+    const variantMap = new Map();
+    for (const row of fallbackData) {
+      const key = `${row.print_option}|${row.lead_time_type}`;
+      if (!variantMap.has(key)) {
+        variantMap.set(key, row);
+      }
+    }
+
+    const variants = Array.from(variantMap.values()).map(row => ({
+      print_option: row.print_option,
+      lead_time_type: row.lead_time_type,
+      moq: row.quantity,
+      moq_price: parseFloat(row.unit_price)
+    }));
+
+    const lowestMoq = variants.reduce((min, v) =>
+      v.moq_price < min.moq_price ? v : min
+    );
+
+    return {
+      product_name: productName || fallbackData[0].product_name,
+      variants,
+      lowest_moq: {
+        quantity: lowestMoq.moq,
+        print_option: lowestMoq.print_option,
+        unit_price: lowestMoq.moq_price
+      }
+    };
+  }
+
+  const variants = data.map(row => ({
+    print_option: row.print_option,
+    lead_time_type: row.lead_time_type,
+    moq: row.quantity,
+    moq_price: parseFloat(row.unit_price)
+  }));
+
+  const lowestMoq = variants.reduce((min, v) =>
+    v.moq_price < min.moq_price ? v : min
+  );
+
+  return {
+    product_name: productName || data[0].product_name,
+    variants,
+    lowest_moq: {
+      quantity: lowestMoq.moq,
+      print_option: lowestMoq.print_option,
+      unit_price: lowestMoq.moq_price
+    }
+  };
+}
+
 /**
  * Get pricing for natural language query results
  * Takes parsed query and found products, returns enriched pricing data
@@ -273,18 +370,23 @@ async function getPricingForProducts(params) {
     }
 
     // Find products that have the requested print option
+    const productIds = products.map(p => p.id).filter(Boolean);
     const productNames = products.map(p => p.name);
-    const { data: matchingPricing } = await supabase
+    let matchingPricingQuery = supabase
       .from('pricing')
-      .select('product_name')
-      .in('product_name', productNames)
+      .select('product_id,product_name');
+    matchingPricingQuery = productIds.length
+      ? matchingPricingQuery.in('product_id', productIds)
+      : matchingPricingQuery.in('product_name', productNames);
+    const { data: matchingPricing } = await matchingPricingQuery
       .eq('lead_time_type', leadTimeType)
       .ilike('print_option', `%${searchPattern}%`);
 
     if (matchingPricing && matchingPricing.length > 0) {
+      const matchingIds = [...new Set(matchingPricing.map(p => p.product_id).filter(Boolean))];
       const matchingNames = [...new Set(matchingPricing.map(p => p.product_name))];
       // Prioritize products that have the requested print option
-      productsToProcess = products.filter(p => matchingNames.includes(p.name));
+      productsToProcess = products.filter(p => (p.id && matchingIds.includes(p.id)) || matchingNames.includes(p.name));
     }
 
     // If no products from original list have the option, search more broadly
@@ -325,14 +427,14 @@ async function getPricingForProducts(params) {
         const { data: options } = await supabase
           .from('pricing')
           .select('print_option')
-          .eq('product_name', product.name)
+          .eq(product.id ? 'product_id' : 'product_name', product.id || product.name)
           .eq('lead_time_type', leadTimeType)
           .limit(1);
 
         selectedPrintOption = options && options.length > 0 ? options[0].print_option : null;
       } else {
         // Try to match print option with fuzzy matching
-        selectedPrintOption = await matchPrintOption(product.name, printOption, leadTimeType);
+        selectedPrintOption = await matchPrintOption(product.name, printOption, leadTimeType, product.id);
 
         // If matched option is different from what user wanted and doesn't contain the key pattern, skip
         if (selectedPrintOption) {
@@ -354,6 +456,7 @@ async function getPricingForProducts(params) {
 
       // Get pricing for this variant
       const pricing = await getPriceForQuantity({
+        productId: product.id,
         productName: product.name,
         printOption: selectedPrintOption,
         leadTimeType,
@@ -366,16 +469,16 @@ async function getPricingForProducts(params) {
 
       // Get all tiers for context
       const allTiers = await getAllPricingTiers({
+        productId: product.id,
         productName: product.name,
         printOption: selectedPrintOption,
         leadTimeType
       });
 
       // Get MOQ info for this specific print option
-      const { data: moqData } = await supabase
+      const { data: moqData } = await applyProductFilter(supabase
         .from('pricing')
-        .select('quantity, unit_price')
-        .eq('product_name', product.name)
+        .select('quantity, unit_price'), { productId: product.id, productName: product.name })
         .eq('print_option', selectedPrintOption)
         .eq('lead_time_type', leadTimeType)
         .order('quantity', { ascending: true })
@@ -393,7 +496,7 @@ async function getPricingForProducts(params) {
         const { data: productData } = await supabase
           .from('products')
           .select('dimensions, category')
-          .eq('name', product.name)
+          .eq(product.id ? 'id' : 'name', product.id || product.name)
           .single();
         if (productData) {
           dimensions = productData.dimensions;
@@ -402,6 +505,8 @@ async function getPricingForProducts(params) {
 
       return {
         product_name: product.name,
+        product_id: product.id || null,
+        website_product_id: product.website_product_id || null,
         dimensions: dimensions,
         category: product.category,
         print_option: selectedPrintOption,
@@ -429,7 +534,7 @@ async function getPricingForProducts(params) {
  * @param {string} leadTimeType - Lead time type
  * @returns {Promise<string|null>} Matched print option or null
  */
-async function matchPrintOption(productName, userInput, leadTimeType = 'local') {
+async function matchPrintOption(productName, userInput, leadTimeType = 'local', productId = null) {
   if (!supabase) {
     throw new Error('Database not configured');
   }
@@ -438,7 +543,7 @@ async function matchPrintOption(productName, userInput, leadTimeType = 'local') 
   const { data, error } = await supabase
     .from('pricing')
     .select('print_option')
-    .eq('product_name', productName)
+    .eq(productId ? 'product_id' : 'product_name', productId || productName)
     .eq('lead_time_type', leadTimeType);
 
   if (error || !data || data.length === 0) {
@@ -592,6 +697,8 @@ module.exports = {
   getPriceForQuantity,
   getAllPricingTiers,
   getMOQInfo,
+  getMOQInfoForProduct,
+  getMOQInfoByIdentity,
   getPricingForProducts,
   matchPrintOption,
   getAlternatives

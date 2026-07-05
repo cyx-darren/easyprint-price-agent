@@ -56,6 +56,24 @@ Discord bot expects:
 - Prefer migrations for schema changes. Keep generated local Supabase state such as `supabase/.temp/` out of Git.
 - Many database tables are intentionally operational/reference data. Check RLS policies before exposing anything through browser clients.
 
+## Pricing Source Router
+
+Start here when deciding which Supabase table answers a pricing question. Each row links to a detailed section below or to the Supabase Table Catalog.
+
+| What is being priced | Read from | Details |
+| --- | --- | --- |
+| Corporate gift catalogue selling prices, quantity tiers, MOQ | `pricing` joined to `products` | Catalogue Price Lookup |
+| Custom heat transfer (dye sublimation) lanyards, 1.5cm/2cm/2.5cm x 90cm | `heat_transfer_lanyard_prices` view (filter by `width_mm` 15/20/25); off-grid quantities via `calculate_heat_transfer_lanyard_price(attachment, qty, freight, width_mm)`; per-design add-on in `lanyard_design_charges` | Heat Transfer (Dye Sublimation) Lanyard Pricing |
+| Ready stock lanyards | `pricing` (they are normal catalogue products) | Catalogue Price Lookup |
+| Paper print products (flyers, booklets, brochures, greeting cards, namecards, red packets, ...) | Profit rule tables (`product_pricing_rules`, `booklet_pricing_rules`, `folded_brochure_pricing_rules`, `greeting_card_pricing_rules`) plus `paper_*` material/finishing cost tables | Paper Product Pricing |
+| Sample fees and sample policies | `sample_pricing` | Supabase Table Catalog |
+| Supplier print/decoration charges (what vendors charge us to print) | `mygift_charges`, `sunprint_charges`, `plsilkscreen_charges` with their `*_category_mappings`; `venue31_charges` for embroidery | Supplier Print Charge References |
+| Supplier item cost and stock availability (NOT customer-facing selling prices) | Vendor silos: `mygift_products`, `fgconcept_products`, `thumbtech_products`, `ultifresh_products`, `orensport_products`, `dealers_fg_stock_balances` | Per-vendor catalogue sections |
+| Benchmark margins when quoting new/custom products | `pricing_benchmark_snapshot_batches` + `pricing_benchmark_snapshots` | Benchmark Profit Snapshots |
+| FX rates and shared pricing constants | `exchange_rates`, `global_overseas_pricing`, `shipping_config`, `packaging_defaults` | Supabase Table Catalog |
+| Lanyard raw cost inputs (components, freight, margins) | `lanyard_component_costs`, `lanyard_freight_costs`, `lanyard_profit_margins`, `lanyard_sea_freight_packaging` — cost model inputs, not selling prices; the calculator above derives selling prices from these | Lanyard Pricing Tables |
+| Overseas supplier sourcing routes (who to ask, not what to charge) | `match_weaver_overseas_supplier(enquiry_text, max_results)` | Weaver Overseas Supplier Mapping |
+
 ## Key Workflows
 
 ### Catalogue Price Lookup
@@ -140,6 +158,27 @@ The importer uses an already-authenticated Chrome DevTools tab to read the share
 OrenSport agent-price PDF data is stored in `orensport_products`. It is an isolated vendor table for item series/code, sizes, agent unit price, combined 4XL/5XL/7XL price, product details, remarks, and later manual `category` / `subcategory` fields.
 
 The PDF importer splits slash-separated item-series cells into individual rows and keeps all price variants, including regular, promotion, WSL, new, and new-size rows. It does not write any shared pricing tables.
+
+### Weaver Overseas Supplier Mapping
+
+Weaver overseas supplier routing from `/Users/darrenchoong/Desktop/overseas-supplier-mapping.xlsx` is stored in `weaver_overseas_supplier_mapping`. It maps item names to preferred overseas supplier contacts, WeChat IDs, group chat names, usual Chinese/internal names, and sourcing remarks.
+
+Supplier specialization and enquiry matching rules live in `weaver_overseas_supplier_routing_rules`. Use `match_weaver_overseas_supplier(enquiry_text, max_results)` to route customer item enquiries to the right supplier by product family, material, service, and priority. The function returns the matched terms, supplier priority, routing note, and contact fields from `weaver_overseas_supplier_mapping`.
+
+These tables are lookup aids for Weaver sourcing. They do not replace `weaver_suppliers`, do not write conversation history, and should not be used as customer-facing pricing sources. The initial 79-row mapping import was loaded into Supabase through the Supabase MCP. RLS is enabled with no public policies, so use service-role/admin workflows unless explicit read policies are added.
+
+### Heat Transfer (Dye Sublimation) Lanyard Pricing
+
+Custom heat transfer (dye sublimation) lanyards are priced by a live calculator in Supabase, not by static rows in `pricing`. The selling-price formula from the master pricing workbook tabs `Heat Transfer Lanyards(1.5cm)`, `(2cm)`, and `(2.5cm)` is implemented in the database and computes from the existing raw-input tables (`lanyard_component_costs`, `lanyard_freight_costs`, `lanyard_profit_margins`, `global_overseas_pricing`), so FX/cost updates flow through automatically with no re-import.
+
+- **View `heat_transfer_lanyard_prices`** — the pricelist other agents should read. One row per attachment combo (77) x width (`width_mm` 15/20/25 = `1.5cm/2cm/2.5cm x 90cm`) x freight type (air/sea) x standard quantity tier (8,085 rows), with `unit_price_sgd`, `total_price_sgd`, MOQ, and lead times. Computed on every read; never stale.
+- **Function `calculate_heat_transfer_lanyard_price(attachment_type, quantity, freight_type, width_mm default 20)`** — same formula for arbitrary quantities (air 50-5000 pcs, sea 500-5000 pcs) with a cost breakdown.
+- Formula summary (all prices SGD before sales GST): goods cost = component cost x qty + flat USD fees (mold fee 15 USD below 3,000 pcs; reel logo print fee 15 USD at all quantities for `retractable reel (logo print)` variants). Air: `((goods + air_freight_usd) * alibaba_surcharge * usd_multiplier + goods * surcharge * usd * (gst - 1)) / margin / qty`, with the 50-99 pc band priced as `(qty-100 total - lanyard_air_qty50_total_discount_sgd) / 50`. Sea: `((goods + courier_usd) * surcharge * usd * gst + sea_freight_sgd) / qty / margin`.
+- The calculator applies this uniform formula to all widths. Two workbook tabs contain internally inconsistent cells that deviate slightly (accepted by Darren, 2026-07-05): the 1.5cm tab's logo-print air rows omit the print fee from the GST term (calculator ~1% higher), and the 2cm tab keeps the mold fee at 3,000+ pcs for `lobster claw + retractable reel` combos (calculator ~1% lower on those 20 cells).
+- Config keys added to `global_overseas_pricing`: `lanyard_air_qty50_total_discount_sgd` (40) and `lanyard_reel_logo_print_fee_usd` (15).
+- Design charges remain a separate per-design add-on in `lanyard_design_charges` (MOQ 30 pcs/design, subject to GST).
+- The backend answers `!price` / `POST /api/price/query` heat transfer or dye sublimation lanyard queries through this calculator (`backend/src/services/lanyardPricing.js`), detecting width (`1.5cm`/`15mm`, `2.5cm`/`25mm`; default 2cm), attachment, freight, and quantity; "ready stock lanyard" queries still resolve through the normal catalogue.
+- `scripts/verify_heat_transfer_lanyard_calculator.js` (read-only) re-downloads all three workbook tabs and asserts all 8,085 published prices still match the view (modulo the documented deviations) — run it after any lanyard cost/FX update.
 
 ### Paper Product Pricing
 
@@ -229,6 +268,7 @@ This catalog describes the public tables currently used by the `easyprint-price-
 | `lanyard_profit_margins` | Lanyard margin rules by freight type and quantity range. | Apply the appropriate margin after costs are calculated. |
 | `lanyard_sea_freight_packaging` | Carton dimensions, CBM, and units per carton for sea freight packaging. | Use for sea freight volume and cartonization assumptions. |
 | `lanyard_design_charges` | Design charges by quantity range. | Add design fees where relevant. |
+| `heat_transfer_lanyard_prices` (view) | Live heat transfer (dye sublimation) lanyard pricelist for 1.5cm/2cm/2.5cm x 90cm (`width_mm` 15/20/25), computed on read from the lanyard cost tables and `global_overseas_pricing`. | Primary read surface for heat transfer lanyard selling prices; SELECT like a table, filtering by `width_mm`. For off-grid quantities call `calculate_heat_transfer_lanyard_price(...)`. |
 
 ### Shipping, Packaging, And Shared Config
 
@@ -249,6 +289,8 @@ This catalog describes the public tables currently used by the `easyprint-price-
 | `quarry_suppliers` | Supplier profile/status records for Quarry sourcing. | Use for supplier metadata, contact history, and reliability context. |
 | `weaver_suppliers` | Supplier profiles for Weaver workflows, including WeChat IDs and product categories. | Use for Weaver supplier contact context. |
 | `weaver_conversations` | Weaver conversation logs with quote-related extracted fields. | Use to audit Weaver supplier chats and extracted quote data. |
+| `weaver_overseas_supplier_mapping` | Item-to-overseas-supplier contact rows imported from the approved `overseas-supplier-mapping.xlsx` workbook. Includes item name, usual name, supplier name, WeChat ID, group chat, remarks, source row metadata, and raw row JSON. RLS is enabled with no public policies. | Use as the contact/source table behind Weaver overseas routing. Access through service-role/admin workflows until explicit read policies are added. |
+| `weaver_overseas_supplier_routing_rules` | Supplier specialization rules for matching customer enquiry text to product families, materials, services, and preferred/fallback suppliers. Includes match terms, exclude terms, priority rank, routing note, and optional link back to a mapping row. RLS is enabled with no public policies. | Use `match_weaver_overseas_supplier(enquiry_text, max_results)` for item sourcing routes. Lower `priority_rank` wins, so examples like Bella before Stephen for pens, Joyce before Seven for decals, kathy before KG Lammi for drinkware, Huang Xu before Zhou for paper bags, and Grace before generic box routing are encoded in data. |
 
 ## Import Scripts
 
@@ -266,6 +308,7 @@ This catalog describes the public tables currently used by the `easyprint-price-
 | `scripts/import_ultifresh_products_from_pdf.py` | Parses `/Users/darrenchoong/Downloads/Ultifresh SG -- Normal Agent Price list - 2025.pdf` with PyMuPDF and imports only to `ultifresh_products`, `ultifresh_product_snapshots`, and `ultifresh_product_import_runs`. Defaults to dry-run; pass `--commit` to write. |
 | `scripts/import_orensport_agent_prices.py` | Parses `/Users/darrenchoong/Downloads/ORENSPORT_AGENT_SG.pdf` with PyMuPDF and imports rows only to `orensport_products`. Defaults to dry-run; pass `--commit` to write. |
 | `scripts/import_pricing_benchmark_snapshots.rb` | Guarded importer for Google Sheet columns N:AD into the benchmark snapshot tables. Validates headers, row count, unique IDs, and A:M digest before writing. |
+| `scripts/verify_heat_transfer_lanyard_calculator.js` | Read-only check that the `heat_transfer_lanyard_prices` view still reproduces every published price in the Heat Transfer Lanyards 1.5cm/2cm/2.5cm workbook tabs (modulo the documented sheet inconsistencies). |
 
 ## Recent Supabase Additions
 
@@ -282,6 +325,16 @@ This catalog describes the public tables currently used by the `easyprint-price-
 - `20260513150500_prepare_ultifresh_import_access.sql` creates scoped temporary import policies for controlled anon-key Ultifresh imports.
 - `20260513151000_remove_ultifresh_import_access.sql` removes the scoped temporary Ultifresh import policies after the controlled import.
 - `20260513160000_create_venue31_charges.sql` creates Venue31 embroidery charge tiers with RLS enabled and no public policies.
+- `20260518195106_create_weaver_overseas_supplier_mapping.sql` creates the locked-down Weaver overseas supplier mapping table. The initial workbook import contains 79 rows from `/Users/darrenchoong/Desktop/overseas-supplier-mapping.xlsx`.
+- `20260523090000_create_weaver_supplier_routing_rules.sql` creates locked-down Weaver overseas supplier routing rules, seeds supplier specialization priorities, preserves existing mapping rows as lower-priority exact-item fallbacks, and adds `match_weaver_overseas_supplier(enquiry_text, max_results)`.
+- `20260523091000_refine_weaver_supplier_routing_matcher.sql` extracts shared term-matching logic into `weaver_supplier_term_matches(...)` and keeps the route matching function stable for service-role/admin lookups.
+- `20260523092000_dedupe_weaver_supplier_routing_matches.sql` returns only the best route per supplier and prevents generic imported box/fan fallbacks from matching pen boxes, cake boxes, or hand fans.
+- `20260523093000_harden_weaver_supplier_routing_helpers.sql` adds the routing source-mapping foreign-key index and pins the supplier text normalizer function search path.
+- `20260705100000_create_heat_transfer_lanyard_pricing.sql` creates the heat transfer lanyard price calculator function, the `heat_transfer_lanyard_prices` view, and the `lanyard_air_qty50_total_discount_sgd` config row. Additive only; no existing tables or rows changed.
+- `20260705101000_add_reel_logo_print_fee_to_lanyard_calculator.sql` adds the `lanyard_reel_logo_print_fee_usd` config row and prices the reel logo print fee into `retractable reel (logo print)` variants.
+- `20260705102000_refine_lanyard_mold_fee_waiver.sql` encodes the 2cm tab's mold-fee rule: waived at 3,000+ pcs except for `lobster claw + retractable reel` combos. After this migration the calculator reproduces all 2,695 published 2cm prices exactly.
+- `20260705110000_add_all_widths_to_heat_transfer_lanyard_pricing.sql` extends the `heat_transfer_lanyard_prices` view to widths 15/20/25 (8,085 rows) and fixes the `size_label` formatting.
+- `20260705111000_simplify_lanyard_mold_fee_waiver.sql` adopts the uniform workbook-wide mold rule (waived at 3,000+ pcs for every attachment) after the 1.5cm/2.5cm tabs showed the lobster-claw-reel exception was a 2cm-tab inconsistency.
 - The first benchmark snapshot batch imported from the Google Sheet is dated `2026-05-10` and contains `12,806` rows.
 
 ## MYGIFT Product Scrape

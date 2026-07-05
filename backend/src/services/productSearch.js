@@ -1,5 +1,7 @@
 const { supabase } = require('./supabase');
 
+const PRODUCT_SELECT = 'id, website_product_id, name, category, dimensions, material, color';
+
 /**
  * Validate fuzzy match to prevent returning wrong products
  * Requires at least 50% word overlap between search term and product name
@@ -39,7 +41,7 @@ function validateMatch(searchTerm, foundProductName) {
 async function searchExact(query, category, limit) {
   let queryBuilder = supabase
     .from('products')
-    .select('id, name, category, dimensions, material, color')
+    .select(PRODUCT_SELECT)
     .eq('name', query)
     .limit(limit);
 
@@ -62,7 +64,7 @@ async function searchExact(query, category, limit) {
 async function searchExactInsensitive(query, category, limit) {
   let queryBuilder = supabase
     .from('products')
-    .select('id, name, category, dimensions, material, color')
+    .select(PRODUCT_SELECT)
     .ilike('name', query)
     .limit(limit);
 
@@ -89,7 +91,7 @@ async function searchFuzzy(query, category, limit) {
     // Fall back to contains match if no significant words
     let queryBuilder = supabase
       .from('products')
-      .select('id, name, category, dimensions, material, color')
+      .select(PRODUCT_SELECT)
       .ilike('name', `%${query.trim()}%`)
       .limit(limit);
 
@@ -105,7 +107,7 @@ async function searchFuzzy(query, category, limit) {
   // Build a query that matches ALL words (not ANY)
   let queryBuilder = supabase
     .from('products')
-    .select('id, name, category, dimensions, material, color')
+    .select(PRODUCT_SELECT)
     .limit(limit);
 
   for (const word of words) {
@@ -196,13 +198,44 @@ async function getProductByName(name) {
 
   const { data, error } = await supabase
     .from('products')
-    .select('id, name, category, dimensions, material, color')
+    .select(PRODUCT_SELECT)
     .eq('name', name)
     .single();
 
   if (error) {
     if (error.code === 'PGRST116') {
       // No rows returned
+      return null;
+    }
+    throw new Error(`Database error: ${error.message}`);
+  }
+
+  return data;
+}
+
+/**
+ * Get product by Product Intelligence / website product id
+ *
+ * @param {string} websiteProductId - Product Intelligence website_product_id
+ * @returns {Promise<object|null>} Product or null
+ */
+async function getProductByWebsiteProductId(websiteProductId) {
+  if (!supabase) {
+    throw new Error('Database not configured');
+  }
+
+  if (!websiteProductId) {
+    return null;
+  }
+
+  const { data, error } = await supabase
+    .from('products')
+    .select(PRODUCT_SELECT)
+    .eq('website_product_id', websiteProductId)
+    .single();
+
+  if (error) {
+    if (error.code === 'PGRST116') {
       return null;
     }
     throw new Error(`Database error: ${error.message}`);
@@ -259,7 +292,7 @@ async function getAllProducts(options = {}) {
   // Build query for products
   let queryBuilder = supabase
     .from('products')
-    .select('id, name, category, dimensions, material, color', { count: 'exact' })
+    .select(PRODUCT_SELECT, { count: 'exact' })
     .order('name')
     .range(offset, offset + limit - 1);
 
@@ -339,6 +372,7 @@ async function getProductSuggestions(query, limit = 5) {
 module.exports = {
   searchProducts,
   getProductByName,
+  getProductByWebsiteProductId,
   getProductPrintOptions,
   getAllProducts,
   getProductSuggestions,
