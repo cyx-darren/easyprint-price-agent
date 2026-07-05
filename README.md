@@ -63,7 +63,7 @@ Start here when deciding which Supabase table answers a pricing question. Each r
 | What is being priced | Read from | Details |
 | --- | --- | --- |
 | Corporate gift catalogue selling prices, quantity tiers, MOQ | `pricing` joined to `products` | Catalogue Price Lookup |
-| Custom heat transfer (dye sublimation) lanyards, 1.5cm/2cm/2.5cm x 90cm | `heat_transfer_lanyard_prices` view (filter by `width_mm` 15/20/25); off-grid quantities via `calculate_heat_transfer_lanyard_price(attachment, qty, freight, width_mm)`; per-design add-on in `lanyard_design_charges` | Heat Transfer (Dye Sublimation) Lanyard Pricing |
+| Custom heat transfer (dye sublimation) lanyards, 1.5cm/2cm/2.5cm x 90cm | `heat_transfer_lanyard_prices` view (filter by `width_mm` 15/20/25); reachable via the standard `website_product_id -> products.id -> product_id` chain; off-grid quantities via `calculate_heat_transfer_lanyard_price(attachment, qty, freight, width_mm)`; per-design add-on in `lanyard_design_charges` | Heat Transfer (Dye Sublimation) Lanyard Pricing |
 | Ready stock lanyards | `pricing` (they are normal catalogue products) | Catalogue Price Lookup |
 | Paper print products (flyers, booklets, brochures, greeting cards, namecards, red packets, ...) | Profit rule tables (`product_pricing_rules`, `booklet_pricing_rules`, `folded_brochure_pricing_rules`, `greeting_card_pricing_rules`) plus `paper_*` material/finishing cost tables | Paper Product Pricing |
 | Sample fees and sample policies | `sample_pricing` | Supabase Table Catalog |
@@ -83,6 +83,44 @@ Use `pricing` joined to `products` for product, print option, lead time, quantit
 - `backend/src/services/productSearch.js`
 - `backend/src/services/priceQuery.js`
 - `backend/src/routes/pricing.js`
+
+#### How a website_product_id resolves to a price
+
+Every catalogue price lookup that starts from the EasyPrint website follows the same two-hop chain:
+
+1. **Resolve the product.** Each row in `products` carries a `website_product_id` (uuid, nullable) that matches the product id used on the EasyPrint website. Look the website id up in `products` to get the internal `products.id`:
+
+   ```sql
+   select id, name from products
+   where website_product_id = '<website product id>';
+   ```
+
+   Note `products.name` is the unique key (`unique_product_name`); `website_product_id` is only indexed (`idx_products_website_product_id`), not unique-constrained, and is null for products not on the website.
+
+2. **Resolve the price.** Take that `products.id` value and search `pricing` under its `product_id` column, filtered by the required specs — `print_option`, `lead_time_type` (`local`, `overseas_air`, `overseas_sea`), and `quantity` tier (`is_moq = true` marks the minimum-order row):
+
+   ```sql
+   select print_option, lead_time_type, quantity, unit_price, currency, is_moq
+   from pricing
+   where product_id = '<products.id from step 1>'
+     and print_option = '<print option>'
+     and lead_time_type = 'local'
+   order by quantity;
+   ```
+
+   Or as a single join from the website id:
+
+   ```sql
+   select pr.name, p.print_option, p.lead_time_type, p.quantity, p.unit_price, p.currency, p.is_moq
+   from products pr
+   join pricing p on p.product_id = pr.id
+   where pr.website_product_id = '<website product id>'
+   order by p.print_option, p.lead_time_type, p.quantity;
+   ```
+
+In the backend this is `POST /api/price/lookup` (`backend/src/routes/pricing.js`): `getProductByWebsiteProductId()` in `productSearch.js` does step 1, then `getPriceForQuantity()` in `priceQuery.js` does step 2 (`.eq('product_id', product.id)` plus the spec filters). Name-based lookups skip step 1 and match `pricing.product_name` / `products.name` instead.
+
+The heat transfer (dye sublimation) lanyard follows the same chain against its live view instead of `pricing` — see Heat Transfer (Dye Sublimation) Lanyard Pricing below.
 
 ### Benchmark Profit Snapshots
 
@@ -172,6 +210,7 @@ These tables are lookup aids for Weaver sourcing. They do not replace `weaver_su
 Custom heat transfer (dye sublimation) lanyards are priced by a live calculator in Supabase, not by static rows in `pricing`. The selling-price formula from the master pricing workbook tabs `Heat Transfer Lanyards(1.5cm)`, `(2cm)`, and `(2.5cm)` is implemented in the database and computes from the existing raw-input tables (`lanyard_component_costs`, `lanyard_freight_costs`, `lanyard_profit_margins`, `global_overseas_pricing`), so FX/cost updates flow through automatically with no re-import.
 
 - **View `heat_transfer_lanyard_prices`** — the pricelist other agents should read. One row per attachment combo (77) x width (`width_mm` 15/20/25 = `1.5cm/2cm/2.5cm x 90cm`) x freight type (air/sea) x standard quantity tier (8,085 rows), with `unit_price_sgd`, `total_price_sgd`, MOQ, and lead times. Computed on every read; never stale.
+- **Linked to `products` like the catalogue** — `products` has a `Heat Transfer (Dye Sublimation) Lanyard` row (id `9d2a44d1-976d-4ba2-a8f5-7ae43b09810e`) whose `website_product_id` is `ece775be-d6de-409f-a129-152d850dba26`, the EasyPrint website's "Lanyards (with printing)" product. The view exposes that row's id as `product_id`, mirroring `pricing.product_id`, so the standard `website_product_id -> products.id -> product_id` chain works here too; the spec filters are `attachment_type` / `width_mm` / `freight_type` / `quantity` instead of `print_option` / `lead_time_type`. The lanyard has no rows in `pricing` — `POST /api/price/lookup` with this `website_product_id` therefore resolves the product but returns `PRICING_NOT_FOUND` (previously `PRODUCT_NOT_FOUND`); lanyard quotes are served by the view/calculator and by the free-text query flow below.
 - **Function `calculate_heat_transfer_lanyard_price(attachment_type, quantity, freight_type, width_mm default 20)`** — same formula for arbitrary quantities (air 50-5000 pcs, sea 500-5000 pcs) with a cost breakdown.
 - Formula summary (all prices SGD before sales GST): goods cost = component cost x qty + flat USD fees (mold fee 15 USD below 3,000 pcs; reel logo print fee 15 USD at all quantities for `retractable reel (logo print)` variants). Air: `((goods + air_freight_usd) * alibaba_surcharge * usd_multiplier + goods * surcharge * usd * (gst - 1)) / margin / qty`, with the 50-99 pc band priced as `(qty-100 total - lanyard_air_qty50_total_discount_sgd) / 50`. Sea: `((goods + courier_usd) * surcharge * usd * gst + sea_freight_sgd) / qty / margin`.
 - The calculator applies this uniform formula to all widths. Two workbook tabs contain internally inconsistent cells that deviate slightly (accepted by Darren, 2026-07-05): the 1.5cm tab's logo-print air rows omit the print fee from the GST term (calculator ~1% higher), and the 2cm tab keeps the mold fee at 3,000+ pcs for `lobster claw + retractable reel` combos (calculator ~1% lower on those 20 cells).
@@ -192,7 +231,7 @@ This catalog describes the public tables currently used by the `easyprint-price-
 
 | Table | Purpose | How agents should use it |
 | --- | --- | --- |
-| `products` | Unique product catalogue entries with name, category, dimensions, material, and color. | Use for product identity and category metadata. Product names are unique and referenced by `pricing.product_id` where available. |
+| `products` | Unique product catalogue entries with name, category, dimensions, material, and color, plus the matching EasyPrint website product id in `website_product_id`. | Use for product identity and category metadata. Product names are unique and referenced by `pricing.product_id` where available. Resolve website lookups via `website_product_id -> id -> pricing.product_id` (see How a website_product_id resolves to a price). |
 | `pricing` | Core corporate gift selling price tiers by product, print option, lead time, quantity, unit price, currency, and MOQ flag. | Primary table for customer-facing price lookups. Match by product/print/lead time, then choose the applicable quantity tier. Do not store cost/profit snapshot fields here. |
 | `pricing_benchmark_snapshot_batches` | One row per imported benchmark snapshot batch, including snapshot date and source sheet metadata. | Use to identify which historical benchmark set to apply, such as `2026-05-10`. |
 | `pricing_benchmark_snapshots` | Per-`pricing.id` benchmark cost/profit snapshot rows from Google Sheet columns N:AD. | Use for quoting benchmark logic. Contains product source, print vendor source, item/print costs, benchmark profit amount, benchmark profit percentage, optional preferred basis, and raw source values. |
@@ -268,7 +307,7 @@ This catalog describes the public tables currently used by the `easyprint-price-
 | `lanyard_profit_margins` | Lanyard margin rules by freight type and quantity range. | Apply the appropriate margin after costs are calculated. |
 | `lanyard_sea_freight_packaging` | Carton dimensions, CBM, and units per carton for sea freight packaging. | Use for sea freight volume and cartonization assumptions. |
 | `lanyard_design_charges` | Design charges by quantity range. | Add design fees where relevant. |
-| `heat_transfer_lanyard_prices` (view) | Live heat transfer (dye sublimation) lanyard pricelist for 1.5cm/2cm/2.5cm x 90cm (`width_mm` 15/20/25), computed on read from the lanyard cost tables and `global_overseas_pricing`. | Primary read surface for heat transfer lanyard selling prices; SELECT like a table, filtering by `width_mm`. For off-grid quantities call `calculate_heat_transfer_lanyard_price(...)`. |
+| `heat_transfer_lanyard_prices` (view) | Live heat transfer (dye sublimation) lanyard pricelist for 1.5cm/2cm/2.5cm x 90cm (`width_mm` 15/20/25), computed on read from the lanyard cost tables and `global_overseas_pricing`. Exposes `product_id` referencing the lanyard's `products` row (website_product_id `ece775be-d6de-409f-a129-152d850dba26`). | Primary read surface for heat transfer lanyard selling prices; SELECT like a table, filtering by `width_mm`, or by `product_id` resolved from the website id like the `pricing` table. For off-grid quantities call `calculate_heat_transfer_lanyard_price(...)`. |
 
 ### Shipping, Packaging, And Shared Config
 
@@ -335,6 +374,7 @@ This catalog describes the public tables currently used by the `easyprint-price-
 - `20260705102000_refine_lanyard_mold_fee_waiver.sql` encodes the 2cm tab's mold-fee rule: waived at 3,000+ pcs except for `lobster claw + retractable reel` combos. After this migration the calculator reproduces all 2,695 published 2cm prices exactly.
 - `20260705110000_add_all_widths_to_heat_transfer_lanyard_pricing.sql` extends the `heat_transfer_lanyard_prices` view to widths 15/20/25 (8,085 rows) and fixes the `size_label` formatting.
 - `20260705111000_simplify_lanyard_mold_fee_waiver.sql` adopts the uniform workbook-wide mold rule (waived at 3,000+ pcs for every attachment) after the 1.5cm/2.5cm tabs showed the lobster-claw-reel exception was a 2cm-tab inconsistency.
+- `20260706090000_link_heat_transfer_lanyard_to_products.sql` inserts the `Heat Transfer (Dye Sublimation) Lanyard` row into `products` (website_product_id `ece775be-d6de-409f-a129-152d850dba26`, the website's "Lanyards (with printing)" product) and rebuilds the `heat_transfer_lanyard_prices` view with a `product_id` column referencing it, so the standard `website_product_id -> products.id -> product_id` chain works for lanyards. Additive only; prices unchanged (workbook re-verified).
 - The first benchmark snapshot batch imported from the Google Sheet is dated `2026-05-10` and contains `12,806` rows.
 
 ## MYGIFT Product Scrape
