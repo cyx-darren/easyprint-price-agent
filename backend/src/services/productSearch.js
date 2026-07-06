@@ -232,16 +232,38 @@ async function getProductByWebsiteProductId(websiteProductId) {
     .from('products')
     .select(PRODUCT_SELECT)
     .eq('website_product_id', websiteProductId)
-    .single();
+    .order('name');
 
   if (error) {
-    if (error.code === 'PGRST116') {
-      return null;
-    }
     throw new Error(`Database error: ${error.message}`);
   }
 
-  return data;
+  // Several size variants can share one website product id (e.g. Enamel Pin
+  // Badge up to 3x3cm / up to 4x4cm both map to the enamel-pin-badges page).
+  // .single() errored on those and silently killed the ID path.
+  const rows = data || [];
+  if (!rows.length) return null;
+  return rows[0];
+}
+
+/**
+ * All size/variant products sharing a website product id.
+ */
+async function getProductsByWebsiteProductId(websiteProductId) {
+  if (!supabase) {
+    throw new Error('Database not configured');
+  }
+  if (!websiteProductId) return [];
+
+  const { data, error } = await supabase
+    .from('products')
+    .select(PRODUCT_SELECT)
+    .eq('website_product_id', websiteProductId)
+    .order('name');
+  if (error) {
+    throw new Error(`Database error: ${error.message}`);
+  }
+  return data || [];
 }
 
 /**
@@ -373,6 +395,7 @@ module.exports = {
   searchProducts,
   getProductByName,
   getProductByWebsiteProductId,
+  getProductsByWebsiteProductId,
   getProductPrintOptions,
   getAllProducts,
   getProductSuggestions,
