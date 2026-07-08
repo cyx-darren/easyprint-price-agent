@@ -11,8 +11,10 @@ const PRODUCT_SELECT = 'id, website_product_id, name, category, dimensions, mate
  * @returns {boolean} Whether the match is valid
  */
 function validateMatch(searchTerm, foundProductName) {
-  const searchWords = searchTerm.toLowerCase().split(/\s+/).filter(w => w.length > 2);
-  const productWords = foundProductName.toLowerCase().split(/\s+/);
+  // Hyphens count as word breaks on BOTH sides: "roll up banner" must score
+  // full overlap against "Roll-up Banner (850mm x 2000mm)".
+  const searchWords = searchTerm.toLowerCase().replace(/-/g, ' ').split(/\s+/).filter(w => w.length > 2);
+  const productWords = foundProductName.toLowerCase().replace(/-/g, ' ').split(/\s+/);
 
   // If no significant search words, accept the match
   if (searchWords.length === 0) {
@@ -85,7 +87,9 @@ async function searchExactInsensitive(query, category, limit) {
  * Tier 3: Fuzzy match (contains search requiring ALL words)
  */
 async function searchFuzzy(query, category, limit) {
-  const words = query.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+  // Split on hyphens too, so "roll-up banner" reaches the DB as %roll% AND
+  // %banner% instead of the unmatchable %roll-up%.
+  const words = query.toLowerCase().split(/[\s-]+/).filter(w => w.length > 2);
 
   if (words.length === 0) {
     // Fall back to contains match if no significant words
@@ -125,6 +129,48 @@ async function searchFuzzy(query, category, limit) {
   }
 
   return data || [];
+}
+
+/**
+ * Tier 4: Normalized fallback — punctuation/hyphen-insensitive containment.
+ * "rollup banner" must match "Roll-up Banner (850mm x 2000mm)": Tier 3's
+ * DB-side %word% filters cannot cross the hyphen, so squash both sides in
+ * memory (the products table is small). Trailing-s singular fallback covers
+ * plural queries against singular catalogue names.
+ */
+async function searchNormalized(query, category, limit) {
+  let queryBuilder = supabase
+    .from('products')
+    .select(PRODUCT_SELECT);
+
+  if (category) {
+    queryBuilder = queryBuilder.eq('category', category);
+  }
+
+  const { data, error } = await queryBuilder;
+
+  if (error) {
+    throw new Error(`Database error: ${error.message}`);
+  }
+
+  const squash = (text) => String(text).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const words = query.toLowerCase().split(/[\s-]+/)
+    .filter(w => w.length > 2)
+    .map(squash)
+    .filter(Boolean);
+
+  if (words.length === 0) {
+    return [];
+  }
+
+  return (data || [])
+    .filter((row) => {
+      const name = squash(row.name);
+      return words.every((word) =>
+        name.includes(word) || (word.endsWith('s') && name.includes(word.slice(0, -1)))
+      );
+    })
+    .slice(0, limit);
 }
 
 /**
@@ -174,6 +220,15 @@ async function searchProducts(query, options = {}) {
   if (validated.length > 0) {
     console.log(`[SEARCH] Found ${validated.length} validated fuzzy match(es) (rejected ${result.length - validated.length})`);
     return validated.map(r => ({ ...r, matchType: 'fuzzy' }));
+  }
+
+  // Tier 4: normalized (hyphen/punctuation-insensitive) fallback
+  result = await searchNormalized(searchTerm, category, limit);
+  const validatedNormalized = result.filter(r => validateMatch(searchTerm, r.name));
+
+  if (validatedNormalized.length > 0) {
+    console.log(`[SEARCH] Found ${validatedNormalized.length} normalized match(es)`);
+    return validatedNormalized.map(r => ({ ...r, matchType: 'fuzzy' }));
   }
 
   // No matches found
